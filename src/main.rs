@@ -1,3 +1,4 @@
+#[cfg(target_os="windows")]
 extern crate winapi;
 
 #[cfg(target_os="windows")]
@@ -21,6 +22,7 @@ use winapi::{
             DispatchMessageA,
             CreateWindowExA,
             WS_OVERLAPPEDWINDOW,
+            DestroyWindow,
             ShowWindow,
             SW_SHOWDEFAULT,
             UpdateWindow,
@@ -39,6 +41,15 @@ use winapi::{
     }
 };
 
+
+#[cfg(target_os="linux")]
+extern crate xcb;
+
+#[cfg(target_os="linux")]
+use xcb::{
+
+};
+
 #[derive(PartialEq,Debug)]
 enum ControlFlow{
     Continue,
@@ -46,14 +57,12 @@ enum ControlFlow{
 }
 #[derive(PartialEq,Debug)]
 enum Event{
-    None,
     WindowCloseRequested,
 }
 
 enum WindowHandle{
     #[cfg(target_os="windows")]
     Windows{
-        hinstance:HINSTANCE,
         hwnd:HWND,
     }
 }
@@ -64,17 +73,27 @@ struct Window{
 }
 impl Window{
 }
+impl Drop for Window{
+    fn drop(&mut self){
+        #[allow(unreachable_patterns)]
+        match self.handle{
+            WindowHandle::Windows{hwnd}=>{
+                unsafe{
+                    DestroyWindow(hwnd);
+                }
+            },
+            _=>unreachable!()
+        }
+    }
+}
 
 #[cfg(target_os="windows")]
-static mut windows_events:Vec<Event>=Vec::new();
+static mut WINDOWS_WINDOW_EVENTS:Vec<Event>=Vec::new();
 #[cfg(target_os="windows")]
 unsafe extern "system" fn windowproc(window:HWND,umsg:u32,wparam:WPARAM,lparam:LPARAM)->LRESULT{
-    //windows_events.push(Event::None);
     match umsg{
         WM_CLOSE=>{
-            unsafe{
-                windows_events.push(Event::WindowCloseRequested);
-            }
+            WINDOWS_WINDOW_EVENTS.push(Event::WindowCloseRequested);
             return 0;
         },
         _=>DefWindowProcA(window,umsg,wparam,lparam)
@@ -104,7 +123,7 @@ impl WindowManagerHandle{
             class.lpfnWndProc=Some(windowproc);
             class.hInstance=hinstance;
             let class_name=String::from("mywindowclass");
-            class.lpszClassName=class_name.as_str().as_ptr() as * const i8;//needs to be same address as the one used for CreateWindowEx
+            class.lpszClassName=class_name.as_str().as_ptr() as LPCSTR;//needs to be same address as the one used for CreateWindowEx
             unsafe{
                 RegisterClassA(&class)
             };
@@ -134,23 +153,23 @@ impl WindowManager{
     pub fn new_window(&mut self,width:u16,height:u16){
         let window=Window{
             handle:{
+                #[allow(unreachable_patterns)]
                 match &self.handle{
                     WindowManagerHandle::Windows{hinstance,class_name}=>{
-                        let mut window_hinstance:HINSTANCE=*hinstance;
-                        let mut window_hwnd:HWND=unsafe{
+                        let window_hwnd:HWND=unsafe{
                             CreateWindowExA(
                                 0,
-                                class_name.as_str().as_ptr() as *const i8,
-                                "my window".as_ptr() as *const i8,
+                                class_name.as_str().as_ptr() as LPCSTR,
+                                "my window".as_ptr() as LPCSTR,
                                 WS_OVERLAPPEDWINDOW,
                                 0,
                                 0,
                                 width as i32,
                                 height as i32,
-                                unsafe{std::ptr::null_mut()},
-                                unsafe{std::ptr::null_mut()},
-                                window_hinstance,
-                                unsafe{std::ptr::null_mut()},
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                *hinstance,
+                                std::ptr::null_mut(),
                             )
                         };
                         if window_hwnd==std::ptr::null_mut(){
@@ -163,7 +182,6 @@ impl WindowManager{
                         }
 
                         WindowHandle::Windows{
-                            hinstance:window_hinstance,
                             hwnd:window_hwnd,
                         }
                     },
@@ -174,12 +192,15 @@ impl WindowManager{
         self.open_windows.push(window);
     }
     pub fn step(&mut self)->ControlFlow{
+        #[allow(unreachable_patterns)]
         match self.handle{
             WindowManagerHandle::Windows{..}=>{
                 let mut msg:MSG=unsafe{
                     std::mem::zeroed()
                 };
-                while unsafe{PeekMessageA(&mut msg,std::ptr::null_mut(),0,0,PM_REMOVE)}>0{
+                while unsafe{
+                    PeekMessageA(&mut msg,std::ptr::null_mut(),0,0,PM_REMOVE)>0
+                }{
                     unsafe{
                         TranslateMessage(&mut msg);
                         DispatchMessageA(&mut msg);
@@ -188,16 +209,18 @@ impl WindowManager{
         
                 #[cfg(target_os="windows")]
                 {
-                    unsafe{
-                        for ev in windows_events.iter(){
-                            match ev{
-                                Event::WindowCloseRequested=>{
-                                    return ControlFlow::Stop;
-                                }
-                                _=>{}
+                    for ev in unsafe{
+                        WINDOWS_WINDOW_EVENTS.iter()
+                    }{
+                        match ev{
+                            Event::WindowCloseRequested=>{
+                                return ControlFlow::Stop;
                             }
+                            _=>{}
                         }
-                        windows_events.clear();
+                    }
+                    unsafe{
+                        WINDOWS_WINDOW_EVENTS.clear();
                     }
                 }
             },
