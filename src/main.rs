@@ -57,6 +57,7 @@ use ash::{
         AllocationCallbacks,
         PhysicalDevice,
     },
+    prelude::VkResult,
     Entry,
     version::{
         EntryV1_0,
@@ -97,6 +98,10 @@ enum WindowHandle{
 struct Window{
     handle:WindowHandle,
     surface:vk::SurfaceKHR,
+    image_available:vk::Semaphore,
+    image_presentable:vk::Semaphore,
+    swapchain:extensions::khr::Swapchain,
+    swapchain_handle:vk::SwapchainKHR,
 }
 struct TestWindow{
     handle:WindowHandle,
@@ -236,6 +241,10 @@ struct WindowManager<'m>{
     physical_device:PhysicalDevice,
     device:Device,
     surface:extensions::khr::Surface,
+    present_queue:vk::Queue,
+    present_queue_family_index:u32,
+    graphics_queue:vk::Queue,
+    graphics_queue_family_index:u32,
 }
 impl WindowManager<'_>{
     pub fn new()->Self{
@@ -399,6 +408,9 @@ impl WindowManager<'_>{
             true
         }).expect("no fit physical device found");
 
+        let present_queue_family_index=queue_create_infos[0].queue_family_index;
+        let graphics_queue_family_index=queue_create_infos[1].queue_family_index;
+
         //merge queues into data structure that has max 1 entry per queue family
         let mut merged_queue_map=std::collections::HashMap::<u32,Vec<usize>>::new();
         let mut merged_queue_create_infos:Vec<vk::DeviceQueueCreateInfo>=Vec::new();
@@ -477,6 +489,19 @@ impl WindowManager<'_>{
             physical_device,
             device,
             surface,
+            present_queue,
+            present_queue_family_index,
+            graphics_queue,
+            graphics_queue_family_index,
+        }
+    }
+
+    pub fn create_semaphore(&self)->VkResult<vk::Semaphore>{
+        let semaphore_create_info=vk::SemaphoreCreateInfo{
+            ..Default::default()
+        };
+        unsafe{
+            self.device.create_semaphore(&semaphore_create_info,self.allocation_callbacks)
         }
     }
 
@@ -529,17 +554,134 @@ impl WindowManager<'_>{
                 _=>unimplemented!()
             }
         };
+                  
+        //vulkan spec states this must be done
+        if unsafe{
+            !self.surface.get_physical_device_surface_support(self.physical_device, self.present_queue_family_index, surface).unwrap()
+        }{
+            panic!("new surface does not support presentation like the temporary ones");
+        }
+
+        //create swapchain
+        let image_available=self.create_semaphore().unwrap();
+        let image_presentable=self.create_semaphore().unwrap();
+
+        let surface_capabilities=unsafe{
+            self.surface.get_physical_device_surface_capabilities(self.physical_device, surface)
+        }.unwrap();
+
+        let mut image_count=surface_capabilities.min_image_count+1;
+        if surface_capabilities.max_image_count>0 && image_count>surface_capabilities.max_image_count{
+            image_count=surface_capabilities.max_image_count;
+        }
+
+        let surface_formats=unsafe{
+            self.surface.get_physical_device_surface_formats(self.physical_device, surface)
+        }.unwrap();
+        //use first available format, but check for two 'better' alternatives
+        let mut surface_format=surface_formats[0];
+        //if the only supported format is 'undefined', there is no preferred format for the surface
+        //then use 'most widely used' format
+        if surface_formats.len()==1 && surface_format.format==vk::Format::UNDEFINED{
+            surface_format=vk::SurfaceFormatKHR{
+                format:vk::Format::R8G8B8A8_UNORM,
+                color_space:vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            };
+        }else{
+            for format in surface_formats.iter(){
+                if format.format==vk::Format::R8G8B8A8_UNORM{
+                    surface_format=*format;
+                }
+            }
+        }
+
+        //set extent to current extent, according to surface
+        //if that is not available (indicated by special values of 'current extent')
+        //extent will be specified by swapchain specs, which are those used for the 
+        //creation of this window
+        let mut swapchain_extent=surface_capabilities.current_extent;
+        if swapchain_extent.width==u32::MAX || swapchain_extent.height==u32::MAX{
+            swapchain_extent.width=width as u32;
+            swapchain_extent.height=height as u32;
+            if swapchain_extent.width<surface_capabilities.min_image_extent.width{
+                swapchain_extent.width=surface_capabilities.min_image_extent.width;
+            }
+            if swapchain_extent.height<surface_capabilities.min_image_extent.height{
+                swapchain_extent.height=surface_capabilities.min_image_extent.height;
+            }
+            if swapchain_extent.width>surface_capabilities.max_image_extent.width{
+                swapchain_extent.width=surface_capabilities.max_image_extent.width;
+            }
+            if swapchain_extent.height>surface_capabilities.max_image_extent.height{
+                swapchain_extent.height=surface_capabilities.max_image_extent.height;
+            }
+        }
+
+        let swapchain_surface_usage_flags=vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST;
+        if !surface_capabilities.supported_usage_flags.contains(swapchain_surface_usage_flags){
+            panic!("surface capabilities");
+        }
+
+        let swapchain_surface_transform=if surface_capabilities.supported_transforms.contains(vk::SurfaceTransformFlagsKHR::IDENTITY){
+            vk::SurfaceTransformFlagsKHR::IDENTITY
+        }else{
+            surface_capabilities.current_transform
+        };
+
+        let surface_present_modes=unsafe{
+            self.surface.get_physical_device_surface_present_modes(self.physical_device, surface)
+        }.unwrap();
+        let swapchain_surface_present_mode=if surface_present_modes.contains(&vk::PresentModeKHR::MAILBOX){
+            vk::PresentModeKHR::MAILBOX
+        }else{
+            vk::PresentModeKHR::FIFO
+        };
+
+        //queue family indices accessing the swapchain (e.g. presenting to it), for which we have a dedicated queue
+        let queue_family_indices=vec![
+            self.present_queue_family_index,
+        ];
+        let swapchain_create_info=vk::SwapchainCreateInfoKHR{
+            surface,
+            min_image_count:image_count,
+            image_format:surface_format.format,
+            image_color_space:surface_format.color_space,
+            image_extent:swapchain_extent,
+            image_array_layers:1,
+            image_usage:swapchain_surface_usage_flags,
+            image_sharing_mode:vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count:queue_family_indices.len() as u32,
+            p_queue_family_indices:queue_family_indices.as_ptr(),
+            pre_transform:swapchain_surface_transform,
+            composite_alpha:vk::CompositeAlphaFlagsKHR::OPAQUE,
+            present_mode:swapchain_surface_present_mode,
+            clipped:0u32,//false, but in c
+            ..Default::default()
+        };
+        let swapchain=extensions::khr::Swapchain::new(&self.instance,&self.device);
+        let swapchain_handle=unsafe{
+            swapchain.create_swapchain(&swapchain_create_info, self.allocation_callbacks)
+        }.unwrap();
+
         let window=Window{
             handle,
             surface,
+            image_available,
+            image_presentable,
+            swapchain,
+            swapchain_handle,
         };
         self.open_windows.push(window);
     }
     fn destroy_window(&mut self,open_window_index:usize){
+        let window=&mut self.open_windows[open_window_index];
         unsafe{
-            self.surface.destroy_surface(self.open_windows[open_window_index].surface,self.allocation_callbacks)
+            self.device.destroy_semaphore(window.image_available, self.allocation_callbacks);
+            self.device.destroy_semaphore(window.image_presentable, self.allocation_callbacks);
+            window.swapchain.destroy_swapchain(window.swapchain_handle,self.allocation_callbacks);
+            self.surface.destroy_surface(window.surface,self.allocation_callbacks)
         };
-        match self.open_windows[open_window_index].handle{
+        match window.handle{
             WindowHandle::Windows{hwnd,..}=>{
                 unsafe{
                     DestroyWindow(hwnd);
