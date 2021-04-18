@@ -61,8 +61,14 @@ use ash::{
     Entry,
     version::{
         EntryV1_0,
+        //EntryV1_1,
+        //EntryV1_2,
         InstanceV1_0,
+        //InstanceV1_1,
+        //InstanceV1_2,
         DeviceV1_0,
+        //DeviceV1_1,
+        //DeviceV1_2,
     },
     Instance,
     Device,
@@ -285,6 +291,7 @@ struct Window{
     handle:WindowHandle,
     surface:vk::SurfaceKHR,
     image_available:vk::Semaphore,
+    image_transferable:vk::Semaphore,
     image_presentable:vk::Semaphore,
     swapchain:extensions::khr::Swapchain,
     swapchain_handle:vk::SwapchainKHR,
@@ -428,9 +435,11 @@ struct WindowManager<'m>{
     present_queue:vk::Queue,
     present_queue_family_index:u32,
     present_queue_command_pool:vk::CommandPool,
+    present_queue_command_buffers:Vec<vk::CommandBuffer>,
     graphics_queue:vk::Queue,
     graphics_queue_family_index:u32,
     graphics_queue_command_pool:vk::CommandPool,
+    graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
 }
 impl WindowManager<'_>{
     pub fn new()->Self{
@@ -450,11 +459,11 @@ impl WindowManager<'_>{
             application_version:vk::make_version(0,1,0),
             p_engine_name:engine_name.as_ptr() as *const i8,
             engine_version:vk::make_version(0,1,0),
-            api_version:vk::make_version(1,2,0),
+            api_version:vk::make_version(1,0,0),
             ..Default::default()
         };
         let instance_layers:Vec<&str>=vec![
-            //"VK_LAYER_KHRONOS_validation\0"//manual 0 termination because str.as_ptr() does not do that
+            "VK_LAYER_KHRONOS_validation\0"//manual 0 termination because str.as_ptr() does not do that
         ];
         let instance_layer_names:Vec<*const i8>=instance_layers.iter().map(|l| l.as_ptr() as *const i8).collect();
         let instance_extensions=vec![
@@ -675,10 +684,12 @@ impl WindowManager<'_>{
         let surface=extensions::khr::Surface::new(&entry,&instance);
         
         let present_queue_command_pool_create_info=vk::CommandPoolCreateInfo{
+            flags:vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             queue_family_index:present_queue_family_index,
             ..Default::default()
         };
         let graphics_queue_command_pool_create_info=vk::CommandPoolCreateInfo{
+            flags:vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             queue_family_index:graphics_queue_family_index,
             ..Default::default()
         };
@@ -689,6 +700,28 @@ impl WindowManager<'_>{
         let graphics_queue_command_pool=unsafe{
             device.create_command_pool(&graphics_queue_command_pool_create_info,allocation_callbacks)
         }.unwrap();
+
+        let graphics_queue_command_buffers_create_info=vk::CommandBufferAllocateInfo{
+            command_pool:graphics_queue_command_pool,
+            level:vk::CommandBufferLevel::PRIMARY,
+            command_buffer_count:1,
+            ..Default::default()
+        };
+        let graphics_queue_command_buffers=unsafe{
+            device.allocate_command_buffers(&graphics_queue_command_buffers_create_info)
+        }.unwrap();
+
+        let present_queue_command_buffers_create_info=vk::CommandBufferAllocateInfo{
+            command_pool:present_queue_command_pool,
+            level:vk::CommandBufferLevel::PRIMARY,
+            command_buffer_count:1,
+            ..Default::default()
+        };
+        let present_queue_command_buffers=unsafe{
+            device.allocate_command_buffers(&present_queue_command_buffers_create_info)
+        }.unwrap();
+
+        //TODO
 
         Self{
             handle,
@@ -702,9 +735,11 @@ impl WindowManager<'_>{
             present_queue,
             present_queue_family_index,
             present_queue_command_pool,
+            present_queue_command_buffers,
             graphics_queue,
             graphics_queue_family_index,
             graphics_queue_command_pool,
+            graphics_queue_command_buffers,
         }
     }
 
@@ -936,6 +971,7 @@ impl WindowManager<'_>{
 
         //create swapchain
         let image_available=self.create_semaphore().unwrap();
+        let image_transferable=self.create_semaphore().unwrap();
         let image_presentable=self.create_semaphore().unwrap();
 
         let surface_capabilities=unsafe{
@@ -1046,6 +1082,7 @@ impl WindowManager<'_>{
             handle,
             surface,
             image_available,
+            image_transferable,
             image_presentable,
             swapchain,
             swapchain_handle,
@@ -1057,6 +1094,7 @@ impl WindowManager<'_>{
         let window=&mut self.open_windows[open_window_index];
         unsafe{
             self.device.destroy_semaphore(window.image_available, self.allocation_callbacks);
+            self.device.destroy_semaphore(window.image_transferable, self.allocation_callbacks);
             self.device.destroy_semaphore(window.image_presentable, self.allocation_callbacks);
             window.swapchain.destroy_swapchain(window.swapchain_handle,self.allocation_callbacks);
             self.surface.destroy_surface(window.surface,self.allocation_callbacks)
@@ -1161,17 +1199,147 @@ impl WindowManager<'_>{
             window.swapchain.acquire_next_image(window.swapchain_handle, u64::MAX, window.image_available, vk::Fence::null())
         }.unwrap();
 
+        let swapchain_image=window.swapchain_images[image_index as usize];
+
+        let present_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
+            flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            ..Default::default()
+        };
+        let graphics_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
+            flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            ..Default::default()
+        };
+
         //begin transition command buffer 1
+        unsafe{
+            self.device.begin_command_buffer(self.present_queue_command_buffers[0],&present_queue_command_buffer_begin_info)
+        }.unwrap();
         //cmd pipeline barrier 1
+        let subresource_range=vk::ImageSubresourceRange{
+            aspect_mask:vk::ImageAspectFlags::COLOR,
+            base_mip_level:0,
+            level_count:1,
+            base_array_layer:0,
+            layer_count:1,
+        };
+        let mut image_memory_barrier=vk::ImageMemoryBarrier{
+            src_access_mask:vk::AccessFlags::MEMORY_READ,
+            dst_access_mask:vk::AccessFlags::MEMORY_READ,
+            old_layout:vk::ImageLayout::UNDEFINED,
+            new_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            src_queue_family_index:self.present_queue_family_index,
+            dst_queue_family_index:self.present_queue_family_index,
+            image:swapchain_image,
+            subresource_range,
+            ..Default::default()
+        };
+        unsafe{
+            self.device.cmd_pipeline_barrier(
+                self.present_queue_command_buffers[0], 
+                vk::PipelineStageFlags::TOP_OF_PIPE, 
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, 
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_memory_barrier]
+            )
+        };
         //end transition command buffer 1
+        unsafe{
+            self.device.end_command_buffer(self.present_queue_command_buffers[0])
+        }.unwrap();
         //submit transition command buffer 1
+        let wait_semaphores_1=vec![
+            window.image_available,
+        ];
+        let dst_stage_masks_1=vec![
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        ];
+        let command_buffers_1=vec![
+            self.present_queue_command_buffers[0]
+        ];
+        let signal_semaphores_1=vec![
+            window.image_transferable
+        ];
+        let submit_info_1=vk::SubmitInfo{
+            wait_semaphore_count:wait_semaphores_1.len() as u32,
+            p_wait_semaphores:wait_semaphores_1.as_ptr(),
+            p_wait_dst_stage_mask:dst_stage_masks_1.as_ptr(),
+            command_buffer_count:command_buffers_1.len() as u32,
+            p_command_buffers:command_buffers_1.as_ptr(),
+            signal_semaphore_count:signal_semaphores_1.len() as u32,
+            p_signal_semaphores:signal_semaphores_1.as_ptr(),
+            ..Default::default()
+        };
+        unsafe{
+            self.device.queue_submit(self.present_queue,&[submit_info_1],vk::Fence::null())
+        }.unwrap();
+        
+        //artificially wait for command buffer to finish before recording again
+        unsafe{
+            self.device.device_wait_idle()
+        }.unwrap();
+
         //begin transition command buffer 2
+        unsafe{
+            self.device.begin_command_buffer(self.present_queue_command_buffers[0],&present_queue_command_buffer_begin_info)
+        }.unwrap();
         //cmd pipeline barrier 2
+        image_memory_barrier=vk::ImageMemoryBarrier{
+            src_access_mask:vk::AccessFlags::MEMORY_READ,
+            dst_access_mask:vk::AccessFlags::MEMORY_READ,
+            old_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            new_layout:vk::ImageLayout::PRESENT_SRC_KHR,
+            src_queue_family_index:self.present_queue_family_index,
+            dst_queue_family_index:self.present_queue_family_index,
+            image:swapchain_image,
+            subresource_range,
+            ..Default::default()
+        };
+        unsafe{
+            self.device.cmd_pipeline_barrier(
+                self.present_queue_command_buffers[0], 
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, 
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_memory_barrier]
+            )
+        };
         //end transition command buffer 2
+        unsafe{
+            self.device.end_command_buffer(self.present_queue_command_buffers[0])
+        }.unwrap();
         //submit transition command buffer 2
+        let wait_semaphores_2=vec![
+            window.image_transferable,
+        ];
+        let dst_stage_masks_2=vec![
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        ];
+        let command_buffers_2=vec![
+            self.present_queue_command_buffers[0]
+        ];
+        let signal_semaphores_2=vec![
+            window.image_presentable
+        ];
+        let submit_info_2=vk::SubmitInfo{
+            wait_semaphore_count:wait_semaphores_2.len() as u32,
+            p_wait_semaphores:wait_semaphores_2.as_ptr(),
+            p_wait_dst_stage_mask:dst_stage_masks_2.as_ptr(),
+            command_buffer_count:command_buffers_2.len() as u32,
+            p_command_buffers:command_buffers_2.as_ptr(),
+            signal_semaphore_count:signal_semaphores_2.len() as u32,
+            p_signal_semaphores:signal_semaphores_2.as_ptr(),
+            ..Default::default()
+        };
+        unsafe{
+            self.device.queue_submit(self.present_queue,&[submit_info_2],vk::Fence::null())
+        }.unwrap();
 
         let present_wait_semaphores=vec![
-            window.image_available,
+            window.image_presentable,
         ];
         let mut present_results=vec![
             vk::Result::SUCCESS,
@@ -1189,6 +1357,10 @@ impl WindowManager<'_>{
             window.swapchain.queue_present(self.present_queue,&present_info)
         }.unwrap();
 
+        unsafe{
+            self.device.device_wait_idle()
+        }.unwrap();
+
         ControlFlow::Continue
     }
 }
@@ -1199,6 +1371,8 @@ impl Drop for WindowManager<'_>{
         }
 
         unsafe{
+            self.device.destroy_command_pool(self.graphics_queue_command_pool, self.allocation_callbacks);
+            self.device.destroy_command_pool(self.present_queue_command_pool, self.allocation_callbacks);
             self.device.destroy_device(self.allocation_callbacks);
             self.instance.destroy_instance(self.allocation_callbacks)
         };
