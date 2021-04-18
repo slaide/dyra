@@ -46,7 +46,7 @@ extern crate xcb;
 
 #[cfg(target_os="linux")]
 use xcb::{
-
+    ffi::*,
 };
 
 extern crate libc;
@@ -69,19 +69,54 @@ use ash::{
     extensions,
 };
 
-#[derive(PartialEq,Debug)]
+#[derive(PartialEq,Debug,Clone,Copy)]
 enum ControlFlow{
     Continue,
     Stop,
 }
-#[derive(PartialEq,Debug)]
+#[derive(PartialEq,Debug,Clone,Copy)]
+enum ButtonKeyState{
+    Pressed,
+    Released,
+}
+#[derive(PartialEq,Debug,Clone,Copy)]
+enum EnterLeave{
+    Enter,
+    Leave,
+}
+#[derive(PartialEq,Debug,Clone,Copy)]
+enum FocusChange{
+    Gained,
+    Lost,
+}
+#[derive(PartialEq,Debug,Clone,Copy)]
 enum Event{
+    FirstEvent,
+    LastEvent,
+    ButtonEvent{
+        button:u32,
+        button_state:ButtonKeyState,
+        x:u16,
+        y:u16,
+        enter_leave:Option<EnterLeave>,
+
+    },
+    KeyEvent{
+        key:u32,
+        key_state:ButtonKeyState,
+        x:u16,
+        y:u16,
+    },
+    FocusEvent{
+        focus_change:FocusChange,
+    },
+    ResizeRequestEvent,
     WindowCloseRequested,
     #[allow(dead_code)]
     None,
 }
 
-enum WindowHandle{
+enum TestWindowHandle{
     #[cfg(target_os="windows")]
     Windows{
         hwnd:HWND,
@@ -89,27 +124,21 @@ enum WindowHandle{
     },
     #[cfg(target_os="linux")]
     Xcb{
-        connection:something,
-        windiw:i32
+        connection:*mut base::xcb_connection_t,
+        visual:xproto::xcb_visualid_t,
+        window:u32,
+        xcb_surface:ash::extensions::khr::XcbSurface,
     },
     #[allow(dead_code)]
     NeverMatch
 }
-struct Window{
-    handle:WindowHandle,
-    surface:vk::SurfaceKHR,
-    image_available:vk::Semaphore,
-    image_presentable:vk::Semaphore,
-    swapchain:extensions::khr::Swapchain,
-    swapchain_handle:vk::SwapchainKHR,
-    swapchain_images:Vec<vk::Image>,
-}
 struct TestWindow{
-    handle:WindowHandle,
+    handle:TestWindowHandle,
 }
 impl TestWindow{
     fn new(window_manager_handle:&WindowManagerHandle, entry: &Entry, instance:&Instance)->TestWindow{
         match &window_manager_handle{
+            #[cfg(target_os="windows")]
             WindowManagerHandle::Windows{hinstance,class_name}=>{
                 let window_hwnd:HWND=unsafe{
                     CreateWindowExA(
@@ -139,20 +168,73 @@ impl TestWindow{
                 let win32_surface=ash::extensions::khr::Win32Surface::new(entry,instance);
 
                 TestWindow{
-                    handle:WindowHandle::Windows{
+                    handle:TestWindowHandle::Windows{
                         hwnd:window_hwnd,
                         win32_surface,
                     },
                 }
             },
-            /*
-                let surface_create_info=vk::XcbSurfaceCreateInfoKHR{
-                    connection,
-                    window,
-                    ..Default::default()
+            #[cfg(target_os="linux")]
+            WindowManagerHandle::Xcb{connection}=>{
+                let window=unsafe{
+                    xcb_generate_id(*connection)
                 };
-                let surface=self.instance.create_xcb_surface(&surface_create_info,self.allocation_callbacks).unwrap();
-            */
+
+                let setup=unsafe{
+                    xcb_get_setup(*connection)
+                };
+                let roots_iterator=unsafe{
+                    xproto::xcb_setup_roots_iterator(setup)
+                };
+                let screen=roots_iterator.data;
+                let visual=unsafe{
+                    (*screen).root_visual
+                };
+
+                let mask=0;
+                let values=vec![
+                ];
+
+                let create_window_cookie=unsafe{
+                    xproto::xcb_create_window_checked(
+                        *connection,
+                        base::XCB_COPY_FROM_PARENT as u8,
+                        window,
+                        (*screen).root,
+                        0,
+                        0,
+                        150,
+                        100,
+                        10,
+                        xproto::XCB_WINDOW_CLASS_INPUT_OUTPUT as u16,
+                        visual,
+                        mask,
+                        values.as_ptr()
+                    )
+                };
+
+                window_manager_handle.xcb_check_cookie(&create_window_cookie,"create window");
+
+                let map_window_cookie=unsafe{
+                    xcb_map_window(*connection,window)
+                };
+                window_manager_handle.xcb_check_cookie(&map_window_cookie,"map window");
+
+                unsafe{
+                    base::xcb_flush(*connection)
+                };
+
+                let xcb_surface=ash::extensions::khr::XcbSurface::new(entry,instance);
+
+                TestWindow{
+                    handle:TestWindowHandle::Xcb{
+                        connection:*connection,
+                        visual,
+                        window,
+                        xcb_surface,
+                    }
+                }
+            },
             _=>unimplemented!()
         }
     }
@@ -161,15 +243,52 @@ impl Drop for TestWindow{
     fn drop(&mut self){//,window_manager_handle:&WindowManagerHandle, entry: &mut Entry, instance:&mut Instance){
         //let surface=ash::extensions::khr::Surface::new(&self.entry,&self.instance);
         match self.handle{
-            WindowHandle::Windows{hwnd,..}=>{
+            #[cfg(target_os="windows")]
+            TestWindowHandle::Windows{hwnd,..}=>{
                 unsafe{
                     DestroyWindow(hwnd);
                 }
+            },
+            #[cfg(target_os="linux")]
+            TestWindowHandle::Xcb{connection,window,..}=>{
+                unsafe{
+                    xcb_destroy_window(connection,window)
+                };
             },
             _=>unreachable!()
         }
 
     }
+}
+
+enum WindowHandle{
+    #[cfg(target_os="windows")]
+    Windows{
+        hwnd:HWND,
+        win32_surface:extensions::khr::Win32Surface,
+    },
+    #[cfg(target_os="linux")]
+    Xcb{
+        connection:*mut base::xcb_connection_t,
+        visual:xproto::xcb_visualid_t,
+        window:u32,
+        xcb_surface:ash::extensions::khr::XcbSurface,
+        close:xcb_atom_t,
+        maximized_horizontal:xcb_atom_t,
+        maximized_vertical:xcb_atom_t,
+        hidden:xcb_atom_t,
+    },
+    #[allow(dead_code)]
+    NeverMatch
+}
+struct Window{
+    handle:WindowHandle,
+    surface:vk::SurfaceKHR,
+    image_available:vk::Semaphore,
+    image_presentable:vk::Semaphore,
+    swapchain:extensions::khr::Swapchain,
+    swapchain_handle:vk::SwapchainKHR,
+    swapchain_images:Vec<vk::Image>,
 }
 
 #[cfg(target_os="windows")]
@@ -193,7 +312,7 @@ enum WindowManagerHandle{
     },
     #[cfg(target_os="linux")]
     Xcb{
-
+        connection:*mut base::xcb_connection_t,
     },
     #[allow(dead_code)]
     NeverMatch
@@ -226,11 +345,75 @@ impl WindowManagerHandle{
         }
         #[cfg(not(target_os="windows"))]
         {
-            unimplemented!()
+            let connection=unsafe{
+                xcb_connect(std::ptr::null(),std::ptr::null_mut())
+            };
+            if connection==std::ptr::null_mut(){
+                panic!("xcb_connect");
+            }
+
+            WindowManagerHandle::Xcb{
+                connection,
+            }
         }
     }
     pub fn destroy(&mut self){
+        match self{
+            #[cfg(target_os="windows")]
+            WindowManagerHandle::Windows{..}=>{
+                //class does not need to be deleted
+            },
+            #[cfg(target_os="linux")]
+            WindowManagerHandle::Xcb{connection}=>{
+                //connection implements drop
+            },
+            _=>unreachable!()
+        }
+    }
 
+    #[cfg(target_os="linux")]
+    fn xcb_check_cookie(&self,cookie:&base::xcb_void_cookie_t,message:&'static str){
+        match self{
+            WindowManagerHandle::Xcb{connection}=>{
+                let error=unsafe{
+                    base::xcb_request_check(*connection,*cookie)
+                };
+                if error!=std::ptr::null_mut(){
+                    panic!("cookie failed on '{}', with minor error code {}, major error code {}",
+                        message,
+                        unsafe{(*error)}.minor_code,
+                        unsafe{(*error)}.major_code,
+                        //unsafe{(*error)}.error_code,
+                    );
+                }
+            },
+            _=>unreachable!()
+        }
+    }
+
+    #[cfg(target_os="linux")]
+    fn get_intern_atom(&self,name:&str)->xcb_atom_t{
+        match self{
+            WindowManagerHandle::Xcb{connection,..}=>{
+                let name_cstr=name.as_ptr() as *const i8;
+                let cookie = unsafe{
+                    xcb_intern_atom(*connection, 0, libc::strlen (name_cstr) as u16, name_cstr )
+                };
+                let mut generic_error:*mut xcb_generic_error_t=std::ptr::null_mut();
+                let reply = unsafe{
+                    xcb_intern_atom_reply ( *connection, cookie, &mut generic_error as *mut *mut xcb_generic_error_t )
+                };
+                if generic_error!=std::ptr::null_mut(){
+                    panic!("intern atom reply retrieve failed with error code {}",unsafe{*generic_error}.error_code)
+                };
+                let atom=unsafe{*reply}.atom;
+                unsafe{
+                    libc::free(reply as *mut libc::c_void);
+                }
+                return atom;
+            },
+            _=>unreachable!()
+        }
     }
 }
 struct WindowManager<'m>{
@@ -271,7 +454,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let instance_layers:Vec<&str>=vec![
-            "VK_LAYER_KHRONOS_validation\0"//manual 0 termination because str.as_ptr() does not do that
+            //"VK_LAYER_KHRONOS_validation\0"//manual 0 termination because str.as_ptr() does not do that
         ];
         let instance_layer_names:Vec<*const i8>=instance_layers.iter().map(|l| l.as_ptr() as *const i8).collect();
         let instance_extensions=vec![
@@ -390,9 +573,17 @@ impl WindowManager<'_>{
                 for qci in queue_create_infos.iter_mut(){
                     if queue_family_property.queue_flags.contains(qci.flag_requirements) && !(qci.presentation_support && ! match &test_window.handle{
                         #[cfg(target_os="windows")]
-                        WindowHandle::Windows{hwnd:_,win32_surface}=>{
+                        TestWindowHandle::Windows{hwnd:_,win32_surface}=>{
                             unsafe{
                                 win32_surface.get_physical_device_win32_presentation_support(**pd,i as u32)
+                            }
+                        },
+                        #[cfg(target_os="linux")]
+                        TestWindowHandle::Xcb{connection,window,xcb_surface,visual}=>{
+                            unsafe{
+                                xcb_surface.get_physical_device_xcb_presentation_support(**pd,i as u32,unsafe{
+                                    std::mem::transmute::<*mut libc::c_void,&mut libc::c_void>((*connection) as *mut libc::c_void)
+                                },*visual)
                             }
                         },
                         _=>unimplemented!()
@@ -526,16 +717,17 @@ impl WindowManager<'_>{
         }
     }
 
-    pub fn new_window(&mut self,width:u16,height:u16){
+    pub fn new_window(&mut self,width:u16,height:u16,title:&str){
         let surface;
         let handle={
             match &self.handle{
+                #[cfg(target_os="windows")]
                 WindowManagerHandle::Windows{hinstance,class_name}=>{
                     let window_hwnd:HWND=unsafe{
                         CreateWindowExA(
                             0,
                             class_name.as_str().as_ptr() as LPCSTR,
-                            "my window".as_ptr() as LPCSTR,
+                            title.as_ptr() as LPCSTR,
                             WS_OVERLAPPEDWINDOW,
                             0,
                             0,
@@ -570,6 +762,165 @@ impl WindowManager<'_>{
                     WindowHandle::Windows{
                         hwnd:window_hwnd,
                         win32_surface,
+                    }
+                },
+                #[cfg(target_os="linux")]
+                WindowManagerHandle::Xcb{connection}=>{
+                    let window=unsafe{
+                        xcb_generate_id(*connection)
+                    };
+
+                    let setup=unsafe{
+                        xcb_get_setup(*connection)
+                    };
+                    let roots_iterator=unsafe{
+                        xproto::xcb_setup_roots_iterator(setup)
+                    };
+                    let screen=roots_iterator.data;
+                    let visual=unsafe{
+                        (*screen).root_visual
+                    };
+
+                    let mask=xproto::XCB_CW_EVENT_MASK;
+                    let values=vec![
+                        xproto::XCB_EVENT_MASK_KEY_PRESS
+                        | xproto::XCB_EVENT_MASK_KEY_RELEASE
+                        | xproto::XCB_EVENT_MASK_BUTTON_PRESS
+                        | xproto::XCB_EVENT_MASK_BUTTON_RELEASE
+                        | xproto::XCB_EVENT_MASK_ENTER_WINDOW
+                        | xproto::XCB_EVENT_MASK_LEAVE_WINDOW
+                        | xproto::XCB_EVENT_MASK_POINTER_MOTION
+                        | xproto::XCB_EVENT_MASK_POINTER_MOTION_HINT
+                        | xproto::XCB_EVENT_MASK_BUTTON_1_MOTION
+                        | xproto::XCB_EVENT_MASK_BUTTON_2_MOTION
+                        | xproto::XCB_EVENT_MASK_BUTTON_3_MOTION
+                        | xproto::XCB_EVENT_MASK_BUTTON_4_MOTION
+                        | xproto::XCB_EVENT_MASK_BUTTON_5_MOTION
+                        | xproto::XCB_EVENT_MASK_BUTTON_MOTION
+                        | xproto::XCB_EVENT_MASK_KEYMAP_STATE
+                        //| xproto::XCB_EVENT_MASK_EXPOSURE
+                        //| xproto::XCB_EVENT_MASK_VISIBILITY_CHANGE
+                        | xproto::XCB_EVENT_MASK_STRUCTURE_NOTIFY
+                        | xproto::XCB_EVENT_MASK_RESIZE_REDIRECT
+                        | xproto::XCB_EVENT_MASK_FOCUS_CHANGE
+                        | xproto::XCB_EVENT_MASK_PROPERTY_CHANGE
+                    ];
+
+                    let create_window_cookie=unsafe{
+                        xproto::xcb_create_window_checked(
+                            *connection,
+                            base::XCB_COPY_FROM_PARENT as u8,
+                            window,
+                            (*screen).root,
+                            0,
+                            0,
+                            width,
+                            height,
+                            10,
+                            xproto::XCB_WINDOW_CLASS_INPUT_OUTPUT as u16,
+                            (*screen).root_visual,
+                            mask,
+                            values.as_ptr()
+                        )
+                    };
+
+                    self.handle.xcb_check_cookie(&create_window_cookie,"create window");
+
+                    unsafe{
+                        base::xcb_flush(*connection)
+                    };
+
+                    //set window decorations (?)
+                    let window_type_atom=self.handle.get_intern_atom("_NET_WM_WINDOW_TYPE\0");
+                    let window_type_normal_atom=self.handle.get_intern_atom("_NET_WM_WINDOW_TYPE_NORMAL\0");
+
+                    let window_type_cookie=unsafe{
+                        xcb_change_property_checked ( 
+                            *connection,
+                            XCB_PROP_MODE_REPLACE as u8,
+                            window,
+                            window_type_atom, //property
+                            xproto::XCB_ATOM_ATOM, //type
+                            32,//format (8,16 or 32 bits per entry in value list)
+                            1, //length of value list
+                            &window_type_normal_atom as *const xcb_atom_t as *const libc::c_void
+                        )
+                    };
+                    self.handle.xcb_check_cookie(&window_type_cookie,"change property");
+
+                    //set window title
+                    for prop_name in vec![
+                        "WM_NAME\0",
+                        "_NET_WM_NAME\0",
+                        "_NET_WM_VISIBLE_NAME\0",
+                        "WM_ICON_NAME\0",
+                        "_NET_WM_ICON_NAME\0",
+                        "_NET_WM_VISIBLE_ICON_NAME\0"
+                    ].iter(){
+                        let cookie=unsafe{
+                            let atom=self.handle.get_intern_atom(prop_name);
+                            xcb_change_property_checked ( 
+                                *connection,
+                                XCB_PROP_MODE_REPLACE as u8,
+                                window,
+                                atom, //property
+                                xproto::XCB_ATOM_STRING, //type
+                                8,//format (8,16 or 32 bits per entry in value list)
+                                libc::strlen(title.as_ptr() as *const i8) as u32, //length of value list
+                                title.as_ptr() as *const i8 as *const libc::c_void // is this is a motif hints struct
+                            )
+                        };
+                        self.handle.xcb_check_cookie(&window_type_cookie,"change property");
+                    }
+
+                    let close=self.handle.get_intern_atom("WM_DELETE_WINDOW\0");//_NET_CLOSE_WINDOW
+                    let hidden=self.handle.get_intern_atom("_NET_WM_STATE_HIDDEN\0");
+                    let maximized_vertical=self.handle.get_intern_atom("_NET_WM_STATE_MAXIMIZED_VERT\0");
+                    let maximized_horizontal=self.handle.get_intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ\0");
+
+                    let cookie=unsafe{
+                        xcb_change_property_checked ( 
+                            *connection,
+                            XCB_PROP_MODE_REPLACE as u8,
+                            window,
+                            self.handle.get_intern_atom("WM_PROTOCOLS\0"), //property
+                            xproto::XCB_ATOM_ATOM, //type
+                            32,//format (8,16 or 32 bits per entry in value list)
+                            1, //length of value list
+                            &close as *const xcb_atom_t as *const libc::c_void // is this is a motif hints struct
+                        )
+                    };
+                    self.handle.xcb_check_cookie(&window_type_cookie,"change property");
+
+                    let map_window_cookie=unsafe{
+                        xcb_map_window(*connection,window)
+                    };
+                    self.handle.xcb_check_cookie(&map_window_cookie,"map window");
+
+                    unsafe{
+                        base::xcb_flush(*connection)
+                    };
+
+                    let xcb_surface=ash::extensions::khr::XcbSurface::new(&self.entry,&self.instance);
+
+                    let surface_create_info=vk::XcbSurfaceCreateInfoKHR{
+                        connection:*connection as *mut libc::c_void,
+                        window:window,
+                        ..Default::default()
+                    };
+                    surface=unsafe{
+                        xcb_surface.create_xcb_surface(&surface_create_info,self.allocation_callbacks)
+                    }.unwrap();
+
+                    WindowHandle::Xcb{
+                        connection:*connection,
+                        visual,
+                        window,
+                        xcb_surface,
+                        close,
+                        hidden,
+                        maximized_horizontal,
+                        maximized_vertical,
                     }
                 },
                 _=>unimplemented!()
@@ -711,10 +1062,17 @@ impl WindowManager<'_>{
             self.surface.destroy_surface(window.surface,self.allocation_callbacks)
         };
         match window.handle{
+            #[cfg(target_os="windows")]
             WindowHandle::Windows{hwnd,..}=>{
                 unsafe{
                     DestroyWindow(hwnd);
                 }
+            },
+            #[cfg(target_os="linux")]
+            WindowHandle::Xcb{connection,window,..}=>{
+                unsafe{
+                    xcb_destroy_window(connection,window)
+                };
             },
             _=>unreachable!()
         }
@@ -722,6 +1080,7 @@ impl WindowManager<'_>{
 
     pub fn step(&mut self)->ControlFlow{
         match self.handle{
+            #[cfg(target_os="windows")]
             WindowManagerHandle::Windows{..}=>{
                 let mut msg:MSG=unsafe{
                     std::mem::zeroed()
@@ -749,6 +1108,45 @@ impl WindowManager<'_>{
                     }
                     unsafe{
                         WINDOWS_WINDOW_EVENTS.clear();
+                    }
+                }
+            },
+            #[cfg(target_os="linux")]
+            WindowManagerHandle::Xcb{connection}=>{
+                unsafe{
+                    xcb_flush(connection);
+                }
+
+                let mut generic_event;
+
+                while{
+                    generic_event=unsafe{
+                        xcb_poll_for_event(connection)
+                    };
+                    generic_event!=std::ptr::null_mut()
+                }{
+                    println!("handling event");
+                    let response_type=unsafe{*generic_event}.response_type & 0x7f;
+                    match response_type{
+                        xproto::XCB_KEY_PRESS=>{
+                            println!("key pressed");
+                        },
+                        xproto::XCB_KEY_RELEASE=>{
+                            println!("key pressed");
+                        },
+                        xproto::XCB_CLIENT_MESSAGE=>{
+                            println!("client message");
+                            let event=generic_event as *const xproto::xcb_client_message_event_t;
+                            match self.open_windows[0].handle{
+                                WindowHandle::Xcb{close,..}=>{
+                                    if unsafe{*event}.data.data32()[0]==close{
+                                        println!("close window");
+                                    }
+                                },
+                                _=>unreachable!()
+                            }
+                        },
+                        _=>{}
                     }
                 }
             },
@@ -827,16 +1225,15 @@ impl Manager<'_>{
                 break;
             }
 
-            //cap framerate at 30fps
-            std::thread::sleep(std::time::Duration::from_millis(1000/30));
-
-            println!("step done");
+            //cap framerate
+            let max_fps=5;
+            std::thread::sleep(std::time::Duration::from_millis(1000/max_fps));
         }
     }
 }
 
 fn main() {
     let mut manager=Manager::new();
-    manager.window_manager.new_window(600,400);
+    manager.window_manager.new_window(600,400,"hello milena");
     manager.run();
 }
