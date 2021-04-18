@@ -1254,22 +1254,20 @@ impl WindowManager<'_>{
                     };
                     generic_event!=std::ptr::null_mut()
                 }{
-                    println!("handling event");
                     let response_type=unsafe{*generic_event}.response_type & 0x7f;
                     match response_type{
                         xproto::XCB_KEY_PRESS=>{
-                            println!("key pressed");
+                            //println!("key pressed");
                         },
                         xproto::XCB_KEY_RELEASE=>{
-                            println!("key pressed");
+                            //println!("key pressed");
                         },
                         xproto::XCB_CLIENT_MESSAGE=>{
-                            println!("client message");
                             let event=generic_event as *const xproto::xcb_client_message_event_t;
                             match self.open_windows[0].handle{
                                 WindowHandle::Xcb{close,..}=>{
                                     if unsafe{*event}.data.data32()[0]==close{
-                                        println!("close window");
+                                        return ControlFlow::Stop;
                                     }
                                 },
                                 _=>unreachable!()
