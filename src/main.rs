@@ -311,6 +311,12 @@ unsafe extern "system" fn windowproc(window:HWND,umsg:u32,wparam:WPARAM,lparam:L
     }
 }
 
+struct IntegratedBuffer{
+    size:u64,
+    buffer:vk::Buffer,
+    memory:vk::DeviceMemory,
+}
+
 enum WindowManagerHandle{
     #[cfg(target_os="windows")]
     Windows{
@@ -430,6 +436,7 @@ struct WindowManager<'m>{
     allocation_callbacks:Option<&'m AllocationCallbacks>,
     instance:Instance,
     physical_device:PhysicalDevice,
+    device_memory_properties:vk::PhysicalDeviceMemoryProperties,
     device:Device,
     surface:extensions::khr::Surface,
     present_queue:vk::Queue,
@@ -441,6 +448,7 @@ struct WindowManager<'m>{
     graphics_queue_command_pool:vk::CommandPool,
     graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
     frame_sync_fence:vk::Fence,
+    staging_buffer:IntegratedBuffer,
 }
 impl WindowManager<'_>{
     pub fn new()->Self{
@@ -488,6 +496,9 @@ impl WindowManager<'_>{
             entry.create_instance(&instance_info,allocation_callbacks).unwrap()
         };
 
+        //create test window with surface that has identical properties to the surfaces used for regular windows later on
+        //required to test which device has a queue family that can present to these surfaces
+        //the window will destroy itself at the end of this function
         let test_window=TestWindow::new(&handle,&entry,&instance);
 
         let device_layers:Vec<&str>=vec![
@@ -502,6 +513,7 @@ impl WindowManager<'_>{
         let mut graphics_queue=vk::Queue::null();
         let mut present_queue=vk::Queue::null();
 
+        //custom queue creation pipeline for more streamlined queue creation process (which does not take queue family max count into account...)
         struct CustomQueueCreateInfo<'a>{
             queue_family_index:u32,
             queues_data:Vec<PriorityAndReference<'a>>,
@@ -684,6 +696,7 @@ impl WindowManager<'_>{
 
         let surface=extensions::khr::Surface::new(&entry,&instance);
         
+        //create command pools for each queue
         let present_queue_command_pool_create_info=vk::CommandPoolCreateInfo{
             flags:vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             queue_family_index:present_queue_family_index,
@@ -702,6 +715,7 @@ impl WindowManager<'_>{
             device.create_command_pool(&graphics_queue_command_pool_create_info,allocation_callbacks)
         }.unwrap();
 
+        //create command buffers for each command pool
         let graphics_queue_command_buffers_create_info=vk::CommandBufferAllocateInfo{
             command_pool:graphics_queue_command_pool,
             level:vk::CommandBufferLevel::PRIMARY,
@@ -732,6 +746,53 @@ impl WindowManager<'_>{
             device.create_fence(&fence_create_info,allocation_callbacks)
         }.unwrap();
 
+        //create staging buffer for resource upload
+        let buffer_size=1*1024*1024;
+        let buffer_create_info=vk::BufferCreateInfo{
+            size:buffer_size,
+            usage:vk::BufferUsageFlags::TRANSFER_SRC,
+            sharing_mode:vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+        let buffer=unsafe{
+            device.create_buffer(&buffer_create_info,allocation_callbacks)
+        }.unwrap();
+
+        let mut memory=vk::DeviceMemory::null();
+
+        let buffer_memory_requirements=unsafe{
+            device.get_buffer_memory_requirements(buffer)
+        };
+
+        let device_memory_properties=unsafe{
+            instance.get_physical_device_memory_properties(physical_device)
+        };
+
+        for memory_type_index in 0..device_memory_properties.memory_type_count{
+            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index)>0) 
+            && device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::HOST_VISIBLE){
+                //allocate
+                let memory_allocate_info=vk::MemoryAllocateInfo{
+                    allocation_size:buffer_memory_requirements.size,
+                    memory_type_index,
+                    ..Default::default()
+                };
+                memory=unsafe{
+                    device.allocate_memory(&memory_allocate_info,allocation_callbacks)
+                }.unwrap();
+                //bind
+                let memory_offset=0;
+                unsafe{
+                    device.bind_buffer_memory(buffer,memory,memory_offset)
+                }.unwrap();
+
+                break;
+            }
+        }
+        if memory==vk::DeviceMemory::null(){
+            panic!("staging buffer has no memory")
+        }
+
         //TODO
 
         Self{
@@ -741,6 +802,7 @@ impl WindowManager<'_>{
             allocation_callbacks,
             instance,
             physical_device,
+            device_memory_properties,
             device,
             surface,
             present_queue,
@@ -751,7 +813,12 @@ impl WindowManager<'_>{
             graphics_queue_family_index,
             graphics_queue_command_pool,
             graphics_queue_command_buffers,
-            frame_sync_fence
+            frame_sync_fence,
+            staging_buffer:IntegratedBuffer{
+                size:buffer_size,
+                buffer,
+                memory,
+            }
         }
     }
 
@@ -1406,6 +1473,8 @@ impl Drop for WindowManager<'_>{
         }
 
         unsafe{
+            self.device.free_memory(self.staging_buffer.memory,self.allocation_callbacks);
+            self.device.destroy_buffer(self.staging_buffer.buffer, self.allocation_callbacks);
             self.device.destroy_fence(self.frame_sync_fence, self.allocation_callbacks);
             self.device.destroy_command_pool(self.graphics_queue_command_pool, self.allocation_callbacks);
             self.device.destroy_command_pool(self.present_queue_command_pool, self.allocation_callbacks);
