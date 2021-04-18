@@ -440,6 +440,7 @@ struct WindowManager<'m>{
     graphics_queue_family_index:u32,
     graphics_queue_command_pool:vk::CommandPool,
     graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
+    frame_sync_fence:vk::Fence,
 }
 impl WindowManager<'_>{
     pub fn new()->Self{
@@ -721,6 +722,16 @@ impl WindowManager<'_>{
             device.allocate_command_buffers(&present_queue_command_buffers_create_info)
         }.unwrap();
 
+        //used to wait for last frame to be finished (and synchronized with max framerate) before new frame starts
+        //must be signaled to simulate last frame being finished on first frame
+        let fence_create_info=vk::FenceCreateInfo{
+            flags:vk::FenceCreateFlags::SIGNALED,
+            ..Default::default()
+        };
+        let frame_sync_fence=unsafe{
+            device.create_fence(&fence_create_info,allocation_callbacks)
+        }.unwrap();
+
         //TODO
 
         Self{
@@ -740,6 +751,7 @@ impl WindowManager<'_>{
             graphics_queue_family_index,
             graphics_queue_command_pool,
             graphics_queue_command_buffers,
+            frame_sync_fence
         }
     }
 
@@ -749,6 +761,19 @@ impl WindowManager<'_>{
         };
         unsafe{
             self.device.create_semaphore(&semaphore_create_info,self.allocation_callbacks)
+        }
+    }
+    pub fn create_fence(&self,signaled:bool)->VkResult<vk::Fence>{
+        let fence_create_info=vk::FenceCreateInfo{
+            flags:if signaled{
+                vk::FenceCreateFlags::SIGNALED
+            }else{
+                vk::FenceCreateFlags::empty()
+            },
+            ..Default::default()
+        };
+        unsafe{
+            self.device.create_fence(&fence_create_info,self.allocation_callbacks)
         }
     }
 
@@ -764,8 +789,8 @@ impl WindowManager<'_>{
                             class_name.as_str().as_ptr() as LPCSTR,
                             title.as_ptr() as LPCSTR,
                             WS_OVERLAPPEDWINDOW,
-                            0,
-                            0,
+                            100,
+                            100,
                             width as i32,
                             height as i32,
                             std::ptr::null_mut(),
@@ -847,8 +872,8 @@ impl WindowManager<'_>{
                             base::XCB_COPY_FROM_PARENT as u8,
                             window,
                             (*screen).root,
-                            0,
-                            0,
+                            100,
+                            100,
                             width,
                             height,
                             10,
@@ -1066,7 +1091,6 @@ impl WindowManager<'_>{
             clipped:0u32,//false, but in c
             ..Default::default()
         };
-        println!("min swapchain image count: {}",swapchain_create_info.min_image_count);
         let swapchain=extensions::khr::Swapchain::new(&self.instance,&self.device);
         let swapchain_handle=unsafe{
             swapchain.create_swapchain(&swapchain_create_info, self.allocation_callbacks)
@@ -1194,10 +1218,20 @@ impl WindowManager<'_>{
         //render here
 
         let window=&mut self.open_windows[0];
+        
+        unsafe{
+            self.device.wait_for_fences(&[self.frame_sync_fence], true, u64::MAX).unwrap();
+            self.device.reset_fences(&[self.frame_sync_fence]).unwrap();
+        }
 
         let (image_index,suboptimal)=unsafe{
             window.swapchain.acquire_next_image(window.swapchain_handle, u64::MAX, window.image_available, vk::Fence::null())
         }.unwrap();
+
+        if suboptimal{
+            println!("swapchain image acquired is suboptimal");
+            return ControlFlow::Stop;
+        }
 
         let swapchain_image=window.swapchain_images[image_index as usize];
 
@@ -1335,7 +1369,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         unsafe{
-            self.device.queue_submit(self.present_queue,&[submit_info_2],vk::Fence::null())
+            self.device.queue_submit(self.present_queue,&[submit_info_2],self.frame_sync_fence)
         }.unwrap();
 
         let present_wait_semaphores=vec![
@@ -1357,20 +1391,22 @@ impl WindowManager<'_>{
             window.swapchain.queue_present(self.present_queue,&present_info)
         }.unwrap();
 
-        unsafe{
-            self.device.device_wait_idle()
-        }.unwrap();
-
         ControlFlow::Continue
     }
 }
 impl Drop for WindowManager<'_>{
     fn drop(&mut self){
+        //finish all gpu interaction, which may include window system interaction before window and vulkan resourse destruction
+        unsafe{
+            self.device.device_wait_idle()
+        }.unwrap();
+
         for open_window_index in 0..self.open_windows.len(){
             self.destroy_window(open_window_index);
         }
 
         unsafe{
+            self.device.destroy_fence(self.frame_sync_fence, self.allocation_callbacks);
             self.device.destroy_command_pool(self.graphics_queue_command_pool, self.allocation_callbacks);
             self.device.destroy_command_pool(self.present_queue_command_pool, self.allocation_callbacks);
             self.device.destroy_device(self.allocation_callbacks);
