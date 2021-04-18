@@ -102,6 +102,7 @@ struct Window{
     image_presentable:vk::Semaphore,
     swapchain:extensions::khr::Swapchain,
     swapchain_handle:vk::SwapchainKHR,
+    swapchain_images:Vec<vk::Image>,
 }
 struct TestWindow{
     handle:WindowHandle,
@@ -243,8 +244,10 @@ struct WindowManager<'m>{
     surface:extensions::khr::Surface,
     present_queue:vk::Queue,
     present_queue_family_index:u32,
+    present_queue_command_pool:vk::CommandPool,
     graphics_queue:vk::Queue,
     graphics_queue_family_index:u32,
+    graphics_queue_command_pool:vk::CommandPool,
 }
 impl WindowManager<'_>{
     pub fn new()->Self{
@@ -479,6 +482,22 @@ impl WindowManager<'_>{
         }
 
         let surface=extensions::khr::Surface::new(&entry,&instance);
+        
+        let present_queue_command_pool_create_info=vk::CommandPoolCreateInfo{
+            queue_family_index:present_queue_family_index,
+            ..Default::default()
+        };
+        let graphics_queue_command_pool_create_info=vk::CommandPoolCreateInfo{
+            queue_family_index:graphics_queue_family_index,
+            ..Default::default()
+        };
+
+        let present_queue_command_pool=unsafe{
+            device.create_command_pool(&present_queue_command_pool_create_info,allocation_callbacks)
+        }.unwrap();
+        let graphics_queue_command_pool=unsafe{
+            device.create_command_pool(&graphics_queue_command_pool_create_info,allocation_callbacks)
+        }.unwrap();
 
         Self{
             handle,
@@ -491,8 +510,10 @@ impl WindowManager<'_>{
             surface,
             present_queue,
             present_queue_family_index,
+            present_queue_command_pool,
             graphics_queue,
             graphics_queue_family_index,
+            graphics_queue_command_pool,
         }
     }
 
@@ -570,7 +591,7 @@ impl WindowManager<'_>{
             self.surface.get_physical_device_surface_capabilities(self.physical_device, surface)
         }.unwrap();
 
-        let mut image_count=surface_capabilities.min_image_count+1;
+        let mut image_count:u32=surface_capabilities.min_image_count+1;
         if surface_capabilities.max_image_count>0 && image_count>surface_capabilities.max_image_count{
             image_count=surface_capabilities.max_image_count;
         }
@@ -658,9 +679,16 @@ impl WindowManager<'_>{
             clipped:0u32,//false, but in c
             ..Default::default()
         };
+        println!("min swapchain image count: {}",swapchain_create_info.min_image_count);
         let swapchain=extensions::khr::Swapchain::new(&self.instance,&self.device);
         let swapchain_handle=unsafe{
             swapchain.create_swapchain(&swapchain_create_info, self.allocation_callbacks)
+        }.unwrap();
+
+        //images may only be created when this function is valled, so presenting an image index before
+        //this function is called violate the specs (the image may not exist yet)
+        let swapchain_images=unsafe{
+            swapchain.get_swapchain_images(swapchain_handle)
         }.unwrap();
 
         let window=Window{
@@ -670,6 +698,7 @@ impl WindowManager<'_>{
             image_presentable,
             swapchain,
             swapchain_handle,
+            swapchain_images,
         };
         self.open_windows.push(window);
     }
@@ -725,6 +754,43 @@ impl WindowManager<'_>{
             },
             _=>panic!("unsupported")
         }
+
+        //render here
+
+        let window=&mut self.open_windows[0];
+
+        let (image_index,suboptimal)=unsafe{
+            window.swapchain.acquire_next_image(window.swapchain_handle, u64::MAX, window.image_available, vk::Fence::null())
+        }.unwrap();
+
+        //begin transition command buffer 1
+        //cmd pipeline barrier 1
+        //end transition command buffer 1
+        //submit transition command buffer 1
+        //begin transition command buffer 2
+        //cmd pipeline barrier 2
+        //end transition command buffer 2
+        //submit transition command buffer 2
+
+        let present_wait_semaphores=vec![
+            window.image_available,
+        ];
+        let mut present_results=vec![
+            vk::Result::SUCCESS,
+        ];
+        let present_info=vk::PresentInfoKHR{
+            wait_semaphore_count:present_wait_semaphores.len() as u32,
+            p_wait_semaphores:present_wait_semaphores.as_ptr(),
+            swapchain_count:1,
+            p_swapchains:&window.swapchain_handle,
+            p_image_indices:&image_index,
+            p_results:present_results.as_mut_ptr(),
+            ..Default::default()
+        };
+        unsafe{
+            window.swapchain.queue_present(self.present_queue,&present_info)
+        }.unwrap();
+
         ControlFlow::Continue
     }
 }
