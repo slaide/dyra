@@ -311,6 +311,39 @@ unsafe extern "system" fn windowproc(window:HWND,umsg:u32,wparam:WPARAM,lparam:L
     }
 }
 
+struct VertexData{
+    x:f32,
+    y:f32,
+    z:f32,
+    w:f32,
+    r:f32,
+    g:f32,
+    b:f32,
+    a:f32,
+}
+impl VertexData{
+    pub fn new(
+        x:f32,
+        y:f32,
+        z:f32,
+        w:f32,
+        r:f32,
+        g:f32,
+        b:f32,
+        a:f32,
+    )->Self{
+        Self{
+            x,
+            y,
+            z,
+            w,
+            r,
+            g,
+            b,
+            a,
+        }
+    }
+}
 struct IntegratedBuffer{
     size:u64,
     buffer:vk::Buffer,
@@ -449,6 +482,7 @@ struct WindowManager<'m>{
     graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
     frame_sync_fence:vk::Fence,
     staging_buffer:IntegratedBuffer,
+    quad_data:Option<IntegratedBuffer>,
 }
 impl WindowManager<'_>{
     pub fn new()->Self{
@@ -769,7 +803,7 @@ impl WindowManager<'_>{
         };
 
         for memory_type_index in 0..device_memory_properties.memory_type_count{
-            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index)>0) 
+            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
             && device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::HOST_VISIBLE){
                 //allocate
                 let memory_allocate_info=vk::MemoryAllocateInfo{
@@ -818,7 +852,8 @@ impl WindowManager<'_>{
                 size:buffer_size,
                 buffer,
                 memory,
-            }
+            },
+            quad_data:None
         }
     }
 
@@ -841,6 +876,139 @@ impl WindowManager<'_>{
         };
         unsafe{
             self.device.create_fence(&fence_create_info,self.allocation_callbacks)
+        }
+    }
+    pub fn new_staging(&mut self,size:u64)->IntegratedBuffer{
+        let buffer_create_info=vk::BufferCreateInfo{
+            size:size,
+            usage:vk::BufferUsageFlags::TRANSFER_SRC,
+            sharing_mode:vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+        let buffer=unsafe{
+            self.device.create_buffer(&buffer_create_info,self.allocation_callbacks)
+        }.unwrap();
+
+        let mut memory=vk::DeviceMemory::null();
+
+        let buffer_memory_requirements=unsafe{
+            self.device.get_buffer_memory_requirements(buffer)
+        };
+
+        let device_memory_properties=unsafe{
+            self.instance.get_physical_device_memory_properties(self.physical_device)
+        };
+
+        for memory_type_index in 0..device_memory_properties.memory_type_count{
+            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
+            && device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::HOST_VISIBLE){
+                //allocate
+                let memory_allocate_info=vk::MemoryAllocateInfo{
+                    allocation_size:buffer_memory_requirements.size,
+                    memory_type_index,
+                    ..Default::default()
+                };
+                memory=unsafe{
+                    self.device.allocate_memory(&memory_allocate_info,self.allocation_callbacks)
+                }.unwrap();
+                //bind
+                let memory_offset=0;
+                unsafe{
+                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
+                }.unwrap();
+
+                break;
+            }
+        }
+        if memory==vk::DeviceMemory::null(){
+            panic!("staging buffer has no memory")
+        }
+
+        IntegratedBuffer{
+            size,
+            buffer,
+            memory,
+        }
+    }
+    pub fn upload_vertex_data(&mut self,vertex_data:&Vec<VertexData>)->IntegratedBuffer{
+        let size=(vertex_data.len() * std::mem::size_of::<VertexData>()) as u64;
+        let buffer_create_info=vk::BufferCreateInfo{
+            size,
+            usage:vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            sharing_mode:vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+        let buffer=unsafe{
+            self.device.create_buffer(&buffer_create_info,self.allocation_callbacks)
+        }.unwrap();
+
+        let mut memory=vk::DeviceMemory::null();
+
+        let buffer_memory_requirements=unsafe{
+            self.device.get_buffer_memory_requirements(buffer)
+        };
+
+        let device_memory_properties=unsafe{
+            self.instance.get_physical_device_memory_properties(self.physical_device)
+        };
+
+        for memory_type_index in 0..device_memory_properties.memory_type_count{
+            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 {
+                //allocate
+                let memory_allocate_info=vk::MemoryAllocateInfo{
+                    allocation_size:buffer_memory_requirements.size,
+                    memory_type_index,
+                    ..Default::default()
+                };
+                memory=unsafe{
+                    self.device.allocate_memory(&memory_allocate_info,self.allocation_callbacks)
+                }.unwrap();
+
+                //bind
+                let memory_offset=0;
+                unsafe{
+                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
+                }.unwrap();
+
+                //map staging (!)
+                let memory_pointer=unsafe{
+                    self.device.map_memory(self.staging_buffer.memory,0,size,vk::MemoryMapFlags::empty())
+                }.unwrap();
+
+                //memcpy
+                unsafe{
+                    libc::memcpy(memory_pointer,vertex_data.as_ptr() as *const libc::c_void,size as usize);
+                }
+
+                //flush
+                let flush_range=vk::MappedMemoryRange{
+                    self.staging_buffer.memory,
+                    offset:0,
+                    size,
+                    ..Default::default()
+                };
+                unsafe{
+                    self.device.flush_mapped_memory_ranges(&[flush_range]);
+                }
+
+                //unmap
+                unsafe{
+                    self.device.unmap_memory(memory);
+                }
+
+                panic!("transfer memory from staging to new buffer here");
+
+                break;
+            }
+        }
+        if memory==vk::DeviceMemory::null(){
+            panic!("staging buffer has no memory")
+        }
+
+        IntegratedBuffer{
+            size,
+            buffer,
+            memory,
         }
     }
 
@@ -1280,7 +1448,29 @@ impl WindowManager<'_>{
             _=>panic!("unsupported")
         }
 
-        //render here
+        if self.quad_data.is_none(){
+            let vertex_data=vec![
+                VertexData::new(
+                  -0.7, -0.7, 0.0, 1.0,
+                  1.0, 0.0, 0.0, 0.0
+                ),
+                VertexData::new(
+                  -0.7, 0.7, 0.0, 1.0,
+                  0.0, 1.0, 0.0, 0.0
+                ),
+                VertexData::new(
+                  0.7, -0.7, 0.0, 1.0,
+                  0.0, 0.0, 1.0, 0.0
+                ),
+                VertexData::new(
+                  0.7, 0.7, 0.0, 1.0,
+                  0.3, 0.3, 0.3, 0.0
+                )
+            ];
+            self.quad_data=Some(self.upload_vertex_data(&vertex_data));
+        }
+
+        //render below
 
         let window=&mut self.open_windows[0];
         
