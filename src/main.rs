@@ -480,6 +480,7 @@ struct WindowManager<'m>{
     graphics_queue_family_index:u32,
     graphics_queue_command_pool:vk::CommandPool,
     graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
+    rendering_done:vk::Semaphore,
     frame_sync_fence:vk::Fence,
     staging_buffer:IntegratedBuffer,
     quad_data:Option<IntegratedBuffer>,
@@ -770,6 +771,13 @@ impl WindowManager<'_>{
             device.allocate_command_buffers(&present_queue_command_buffers_create_info)
         }.unwrap();
 
+        let semaphore_create_info=vk::SemaphoreCreateInfo{
+            ..Default::default()
+        };
+        let rendering_done=unsafe{
+            device.create_semaphore(&semaphore_create_info,allocation_callbacks)
+        }.unwrap();
+
         //used to wait for last frame to be finished (and synchronized with max framerate) before new frame starts
         //must be signaled to simulate last frame being finished on first frame
         let fence_create_info=vk::FenceCreateInfo{
@@ -847,6 +855,7 @@ impl WindowManager<'_>{
             graphics_queue_family_index,
             graphics_queue_command_pool,
             graphics_queue_command_buffers,
+            rendering_done,
             frame_sync_fence,
             staging_buffer:IntegratedBuffer{
                 size:buffer_size,
@@ -930,7 +939,7 @@ impl WindowManager<'_>{
             memory,
         }
     }
-    pub fn upload_vertex_data(&mut self,vertex_data:&Vec<VertexData>)->IntegratedBuffer{
+    pub fn upload_vertex_data(&mut self,vertex_data:&Vec<VertexData>,command_buffer:vk::CommandBuffer)->IntegratedBuffer{
         let size=(vertex_data.len() * std::mem::size_of::<VertexData>()) as u64;
         let buffer_create_info=vk::BufferCreateInfo{
             size,
@@ -953,7 +962,8 @@ impl WindowManager<'_>{
         };
 
         for memory_type_index in 0..device_memory_properties.memory_type_count{
-            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 {
+            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
+            && device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::DEVICE_LOCAL){
                 //allocate
                 let memory_allocate_info=vk::MemoryAllocateInfo{
                     allocation_size:buffer_memory_requirements.size,
@@ -982,21 +992,29 @@ impl WindowManager<'_>{
 
                 //flush
                 let flush_range=vk::MappedMemoryRange{
-                    self.staging_buffer.memory,
+                    memory:self.staging_buffer.memory,
                     offset:0,
                     size,
                     ..Default::default()
                 };
                 unsafe{
-                    self.device.flush_mapped_memory_ranges(&[flush_range]);
-                }
+                    self.device.flush_mapped_memory_ranges(&[flush_range])
+                }.unwrap();
 
                 //unmap
                 unsafe{
-                    self.device.unmap_memory(memory);
+                    self.device.unmap_memory(self.staging_buffer.memory);
                 }
 
-                panic!("transfer memory from staging to new buffer here");
+                unsafe{
+                    self.device.cmd_copy_buffer(command_buffer,self.staging_buffer.buffer,buffer,&[
+                        vk::BufferCopy{
+                            src_offset:0,
+                            dst_offset:0,
+                            size,
+                        }
+                    ])
+                };
 
                 break;
             }
@@ -1448,31 +1466,7 @@ impl WindowManager<'_>{
             _=>panic!("unsupported")
         }
 
-        if self.quad_data.is_none(){
-            let vertex_data=vec![
-                VertexData::new(
-                  -0.7, -0.7, 0.0, 1.0,
-                  1.0, 0.0, 0.0, 0.0
-                ),
-                VertexData::new(
-                  -0.7, 0.7, 0.0, 1.0,
-                  0.0, 1.0, 0.0, 0.0
-                ),
-                VertexData::new(
-                  0.7, -0.7, 0.0, 1.0,
-                  0.0, 0.0, 1.0, 0.0
-                ),
-                VertexData::new(
-                  0.7, 0.7, 0.0, 1.0,
-                  0.3, 0.3, 0.3, 0.0
-                )
-            ];
-            self.quad_data=Some(self.upload_vertex_data(&vertex_data));
-        }
-
         //render below
-
-        let window=&mut self.open_windows[0];
         
         unsafe{
             self.device.wait_for_fences(&[self.frame_sync_fence], true, u64::MAX).unwrap();
@@ -1480,7 +1474,7 @@ impl WindowManager<'_>{
         }
 
         let (image_index,suboptimal)=unsafe{
-            window.swapchain.acquire_next_image(window.swapchain_handle, u64::MAX, window.image_available, vk::Fence::null())
+            self.open_windows[0].swapchain.acquire_next_image(self.open_windows[0].swapchain_handle, u64::MAX, self.open_windows[0].image_available, vk::Fence::null())
         }.unwrap();
 
         if suboptimal{
@@ -1488,7 +1482,7 @@ impl WindowManager<'_>{
             return ControlFlow::Stop;
         }
 
-        let swapchain_image=window.swapchain_images[image_index as usize];
+        let swapchain_image=self.open_windows[0].swapchain_images[image_index as usize];
 
         let present_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
             flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
@@ -1539,7 +1533,7 @@ impl WindowManager<'_>{
         }.unwrap();
         //submit transition command buffer 1
         let wait_semaphores_1=vec![
-            window.image_available,
+            self.open_windows[0].image_available,
         ];
         let dst_stage_masks_1=vec![
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -1548,7 +1542,7 @@ impl WindowManager<'_>{
             self.present_queue_command_buffers[0]
         ];
         let signal_semaphores_1=vec![
-            window.image_transferable
+            self.open_windows[0].image_transferable
         ];
         let submit_info_1=vk::SubmitInfo{
             wait_semaphore_count:wait_semaphores_1.len() as u32,
@@ -1562,6 +1556,65 @@ impl WindowManager<'_>{
         };
         unsafe{
             self.device.queue_submit(self.present_queue,&[submit_info_1],vk::Fence::null())
+        }.unwrap();
+
+        //record graphics command buffer
+        //begin
+        unsafe{
+            self.device.begin_command_buffer(self.graphics_queue_command_buffers[0], &graphics_queue_command_buffer_begin_info)
+        }.unwrap();
+
+        //record upload, if required
+        if self.quad_data.is_none(){
+            let vertex_data=vec![
+                VertexData::new(
+                  -0.7, -0.7, 0.0, 1.0,
+                  1.0, 0.0, 0.0, 0.0
+                ),
+                VertexData::new(
+                  -0.7, 0.7, 0.0, 1.0,
+                  0.0, 1.0, 0.0, 0.0
+                ),
+                VertexData::new(
+                  0.7, -0.7, 0.0, 1.0,
+                  0.0, 0.0, 1.0, 0.0
+                ),
+                VertexData::new(
+                  0.7, 0.7, 0.0, 1.0,
+                  0.3, 0.3, 0.3, 0.0
+                )
+            ];
+            self.quad_data=Some(self.upload_vertex_data(&vertex_data,self.graphics_queue_command_buffers[0]));
+        }
+        //end
+        unsafe{
+            self.device.end_command_buffer(self.graphics_queue_command_buffers[0])
+        }.unwrap();
+        //submit
+        let wait_semaphores_graphics=vec![
+            self.open_windows[0].image_transferable,
+        ];
+        let dst_stage_masks_graphics=vec![
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        ];
+        let command_buffers_graphics=vec![
+            self.graphics_queue_command_buffers[0]
+        ];
+        let signal_semaphores=vec![
+            self.rendering_done
+        ];
+        let submit_info_graphics=vk::SubmitInfo{
+            wait_semaphore_count:wait_semaphores_graphics.len() as u32,
+            p_wait_semaphores:wait_semaphores_graphics.as_ptr(),
+            p_wait_dst_stage_mask:dst_stage_masks_graphics.as_ptr(),
+            command_buffer_count:command_buffers_graphics.len() as u32,
+            p_command_buffers:command_buffers_graphics.as_ptr(),
+            signal_semaphore_count:signal_semaphores.len() as u32,
+            p_signal_semaphores:signal_semaphores.as_ptr(),
+            ..Default::default()
+        };
+        unsafe{
+            self.device.queue_submit(self.graphics_queue,&[submit_info_graphics],vk::Fence::null())
         }.unwrap();
         
         //artificially wait for command buffer to finish before recording again
@@ -1602,7 +1655,7 @@ impl WindowManager<'_>{
         }.unwrap();
         //submit transition command buffer 2
         let wait_semaphores_2=vec![
-            window.image_transferable,
+            self.rendering_done,
         ];
         let dst_stage_masks_2=vec![
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -1611,7 +1664,7 @@ impl WindowManager<'_>{
             self.present_queue_command_buffers[0]
         ];
         let signal_semaphores_2=vec![
-            window.image_presentable
+            self.open_windows[0].image_presentable
         ];
         let submit_info_2=vk::SubmitInfo{
             wait_semaphore_count:wait_semaphores_2.len() as u32,
@@ -1628,7 +1681,7 @@ impl WindowManager<'_>{
         }.unwrap();
 
         let present_wait_semaphores=vec![
-            window.image_presentable,
+            self.open_windows[0].image_presentable,
         ];
         let mut present_results=vec![
             vk::Result::SUCCESS,
@@ -1637,13 +1690,13 @@ impl WindowManager<'_>{
             wait_semaphore_count:present_wait_semaphores.len() as u32,
             p_wait_semaphores:present_wait_semaphores.as_ptr(),
             swapchain_count:1,
-            p_swapchains:&window.swapchain_handle,
+            p_swapchains:&self.open_windows[0].swapchain_handle,
             p_image_indices:&image_index,
             p_results:present_results.as_mut_ptr(),
             ..Default::default()
         };
         unsafe{
-            window.swapchain.queue_present(self.present_queue,&present_info)
+            self.open_windows[0].swapchain.queue_present(self.present_queue,&present_info)
         }.unwrap();
 
         ControlFlow::Continue
@@ -1661,9 +1714,14 @@ impl Drop for WindowManager<'_>{
         }
 
         unsafe{
+            if let Some(quad_data)=&self.quad_data{
+                self.device.free_memory(quad_data.memory,self.allocation_callbacks);
+                self.device.destroy_buffer(quad_data.buffer, self.allocation_callbacks);
+            }
             self.device.free_memory(self.staging_buffer.memory,self.allocation_callbacks);
             self.device.destroy_buffer(self.staging_buffer.buffer, self.allocation_callbacks);
             self.device.destroy_fence(self.frame_sync_fence, self.allocation_callbacks);
+            self.device.destroy_semaphore(self.rendering_done,self.allocation_callbacks);
             self.device.destroy_command_pool(self.graphics_queue_command_pool, self.allocation_callbacks);
             self.device.destroy_command_pool(self.present_queue_command_pool, self.allocation_callbacks);
             self.device.destroy_device(self.allocation_callbacks);
