@@ -256,11 +256,11 @@ impl TestWindow<'_>{
                     window:window,
                     ..Default::default()
                 };
-                let pltform_surface=unsafe{
+                let platform_surface=unsafe{
                     xcb_surface.create_xcb_surface(&surface_create_info,allocation_callbacks)
                 }.unwrap();
 
-                let surface=vk::extensions::khr::Surface::new(entry,instance);
+                let surface=extensions::khr::Surface::new(entry,instance);
 
                 TestWindow{
                     handle:TestWindowHandle::Xcb{
@@ -970,7 +970,7 @@ impl WindowManager<'_>{
             device.create_shader_module(&fragment_shader_create_info,allocation_callbacks)
         }.unwrap();
 
-        let shader_entry_fn_name="main".as_ptr() as *const i8;
+        let shader_entry_fn_name="main\0".as_ptr() as *const i8;
         let shader_stage_create_infos=vec![
             vk::PipelineShaderStageCreateInfo{
                 stage:vk::ShaderStageFlags::VERTEX,
