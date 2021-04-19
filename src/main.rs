@@ -1018,29 +1018,11 @@ impl WindowManager<'_>{
             primitive_restart_enable:false as u32,
             ..Default::default()
         };
-        let viewport=vk::Viewport{
-            x:0.0,
-            y:0.0,
-            width:584.0, //TODO BUT HARD (solve with dynamic pipeline state)
-            height:361.0, //TODO HARD AS WELL
-            min_depth:0.0,
-            max_depth:1.0,
-        };
-        let scissor=vk::Rect2D{
-            offset:vk::Offset2D{
-              x:0,
-              y:0,  
-            },
-            extent:vk::Extent2D{
-                width:581,//TODO HARD
-                height:361,//TODO HARD
-            }
-        };
         let viewport_state_create_info=vk::PipelineViewportStateCreateInfo{
             viewport_count:1,
-            p_viewports:&viewport,
-            scissor_count:1,
-            p_scissors:&scissor,
+            //p_viewports:&viewport,//this is ignored if viewports are dynamic
+            scissor_count:1,//must match viewport count
+            //p_scissors:&scissor,//ignored if scissors are dynamic
             ..Default::default()
         };
         let rasterization_state_create_info=vk::PipelineRasterizationStateCreateInfo{
@@ -1079,6 +1061,15 @@ impl WindowManager<'_>{
             blend_constants:[0.0,0.0,0.0,0.0,],
             ..Default::default()
         };
+        let dynamic_states=vec![
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+        ];
+        let dynamic_state_create_info=vk::PipelineDynamicStateCreateInfo{
+            dynamic_state_count:dynamic_states.len() as u32,
+            p_dynamic_states:dynamic_states.as_ptr(),
+            ..Default::default()
+        };
         let graphics_pipeline_create_info=vk::GraphicsPipelineCreateInfo{
             stage_count:shader_stage_create_infos.len() as u32,
             p_stages:shader_stage_create_infos.as_ptr(),
@@ -1088,6 +1079,7 @@ impl WindowManager<'_>{
             p_rasterization_state:&rasterization_state_create_info,
             p_multisample_state:&multisample_state_create_info,
             p_color_blend_state:&color_blend_state,
+            p_dynamic_state:&dynamic_state_create_info,
             layout:graphics_pipeline_layout,
             render_pass,
             subpass:0,
@@ -1950,6 +1942,28 @@ impl WindowManager<'_>{
         //bind pipeline
         unsafe{
             self.device.cmd_bind_pipeline(self.graphics_queue_command_buffers[0],vk::PipelineBindPoint::GRAPHICS,self.graphics_pipeline);
+        }
+        let viewport=vk::Viewport{
+            x:0.0,
+            y:0.0,
+            width:self.open_windows[0].extent.width as f32,
+            height:self.open_windows[0].extent.height as f32,
+            min_depth:0.0,
+            max_depth:1.0,
+        };
+        let scissor=vk::Rect2D{
+            offset:vk::Offset2D{
+              x:0,
+              y:0,  
+            },
+            extent:vk::Extent2D{
+                width:self.open_windows[0].extent.width,
+                height:self.open_windows[0].extent.height,
+            }
+        };
+        unsafe{
+            self.device.cmd_set_viewport(self.graphics_queue_command_buffers[0],0,&[viewport]);
+            self.device.cmd_set_scissor(self.graphics_queue_command_buffers[0],0,&[scissor]);
         }
         //draw
         unsafe{
