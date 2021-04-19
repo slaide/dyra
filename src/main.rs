@@ -1021,8 +1021,8 @@ impl WindowManager<'_>{
         let viewport=vk::Viewport{
             x:0.0,
             y:0.0,
-            width:500.0, //TODO BUT HARD (solve with dynamic pipeline state)
-            height:300.0, //TODO HARD AS WELL
+            width:584.0, //TODO BUT HARD (solve with dynamic pipeline state)
+            height:361.0, //TODO HARD AS WELL
             min_depth:0.0,
             max_depth:1.0,
         };
@@ -1032,8 +1032,8 @@ impl WindowManager<'_>{
               y:0,  
             },
             extent:vk::Extent2D{
-                width:500,//TODO HARD
-                height:300,//TODO HARD
+                width:581,//TODO HARD
+                height:361,//TODO HARD
             }
         };
         let viewport_state_create_info=vk::PipelineViewportStateCreateInfo{
@@ -1062,6 +1062,13 @@ impl WindowManager<'_>{
         };
         let color_blend_attachment_state=vk::PipelineColorBlendAttachmentState{
             blend_enable:false as u32,
+            //src_color_blend_factor:vk::BlendFactor::ONE,
+            //dst_color_blend_factor:vk::BlendFactor::ZERO,
+            //color_blend_op:vk::BlendOp::ADD,
+            //src_alpha_blend_factor:vk::BlendFactor::ONE,
+            //dst_alpha_blend_factor:vk::BlendFactor::ZERO,
+            //alpha_blend_op:vk::BlendOp::ADD,
+            color_write_mask:vk::ColorComponentFlags::all(),//disable blending, but which color channels are forwarded still needs to be specified
             ..Default::default()
         };
         let color_blend_state=vk::PipelineColorBlendStateCreateInfo{
@@ -1263,6 +1270,17 @@ impl WindowManager<'_>{
                     self.device.unmap_memory(self.staging_buffer.memory);
                 }
 
+                let buffer_memory_barrier = vk::BufferMemoryBarrier{
+                    src_access_mask:vk::AccessFlags::MEMORY_WRITE,
+                    dst_access_mask:vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    buffer,
+                    offset: 0,
+                    size,
+                    ..Default::default()
+                  };
+
                 unsafe{
                     self.device.cmd_copy_buffer(command_buffer,self.staging_buffer.buffer,buffer,&[
                         vk::BufferCopy{
@@ -1270,7 +1288,10 @@ impl WindowManager<'_>{
                             dst_offset:0,
                             size,
                         }
-                    ])
+                    ]);
+
+                    //perform buffer layout transition from copy target to vertex data source
+                    self.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &[buffer_memory_barrier], &[]);
                 };
 
                 break;
@@ -1903,7 +1924,7 @@ impl WindowManager<'_>{
         //begin render pass
         let clear_value=vk::ClearValue{
             color:vk::ClearColorValue{
-                float32:[1.0,0.5,0.1,1.0],
+                float32:[0.9,0.5,0.2,1.0],
             },
         };
         let render_pass_begin_info=vk::RenderPassBeginInfo{
@@ -1927,9 +1948,18 @@ impl WindowManager<'_>{
             self.device.cmd_begin_render_pass(self.graphics_queue_command_buffers[0], &render_pass_begin_info, vk::SubpassContents::INLINE)
         };
         //bind pipeline
-        //todo!("bind pipeline");
+        unsafe{
+            self.device.cmd_bind_pipeline(self.graphics_queue_command_buffers[0],vk::PipelineBindPoint::GRAPHICS,self.graphics_pipeline);
+        }
         //draw
-        //todo!("draw");
+        unsafe{
+            if let Some(quad_data)=&self.quad_data{
+                self.device.cmd_bind_vertex_buffers(self.graphics_queue_command_buffers[0],0,&[quad_data.buffer],&[0]);
+                self.device.cmd_draw(self.graphics_queue_command_buffers[0],4,1,0,0);
+            }else{
+                panic!("no quad data where some should be!");
+            }
+        }
         //end render pass
         unsafe{
             self.device.cmd_end_render_pass(self.graphics_queue_command_buffers[0])
