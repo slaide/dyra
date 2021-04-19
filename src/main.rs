@@ -49,6 +49,8 @@ use xcb::{
     ffi::*,
 };
 
+#[macro_use]
+extern crate memoffset;
 extern crate libc;
 extern crate ash;
 use ash::{
@@ -138,11 +140,14 @@ enum TestWindowHandle{
     #[allow(dead_code)]
     NeverMatch
 }
-struct TestWindow{
+struct TestWindow<'a>{
     handle:TestWindowHandle,
+    surface:extensions::khr::Surface,
+    platform_surface:vk::SurfaceKHR,
+    allocation_callbacks:Option<&'a vk::AllocationCallbacks>,
 }
-impl TestWindow{
-    fn new(window_manager_handle:&WindowManagerHandle, entry: &Entry, instance:&Instance)->TestWindow{
+impl TestWindow<'_>{
+    fn new<'a>(window_manager_handle:&WindowManagerHandle, entry: &Entry, instance:&Instance, allocation_callbacks:Option<&'a vk::AllocationCallbacks>)->TestWindow<'a>{
         match &window_manager_handle{
             #[cfg(target_os="windows")]
             WindowManagerHandle::Windows{hinstance,class_name}=>{
@@ -171,13 +176,27 @@ impl TestWindow{
                     UpdateWindow(window_hwnd);
                 }
                 
-                let win32_surface=ash::extensions::khr::Win32Surface::new(entry,instance);
+                let win32_surface=ash::extensions::khr::Win32Surface::new(entry,instance);     
+                
+                let surface_create_info=vk::Win32SurfaceCreateInfoKHR{
+                    hinstance:*hinstance as *const libc::c_void,
+                    hwnd:window_hwnd as *const libc::c_void,
+                    ..Default::default()
+                };
+                let platform_surface=unsafe{
+                    win32_surface.create_win32_surface(&surface_create_info,allocation_callbacks)
+                }.unwrap();
 
-                TestWindow{
+                let surface=extensions::khr::Surface::new(entry,instance);
+
+                TestWindow::<'_>{
                     handle:TestWindowHandle::Windows{
                         hwnd:window_hwnd,
                         win32_surface,
                     },
+                    surface,
+                    platform_surface,
+                    allocation_callbacks
                 }
             },
             #[cfg(target_os="linux")]
@@ -232,22 +251,38 @@ impl TestWindow{
 
                 let xcb_surface=ash::extensions::khr::XcbSurface::new(entry,instance);
 
+                let surface_create_info=vk::XcbSurfaceCreateInfoKHR{
+                    connection:*connection as *mut libc::c_void,
+                    window:window,
+                    ..Default::default()
+                };
+                let pltform_surface=unsafe{
+                    xcb_surface.create_xcb_surface(&surface_create_info,allocation_callbacks)
+                }.unwrap();
+
+                let surface=vk::extensions::khr::Surface::new(entry,instance);
+
                 TestWindow{
                     handle:TestWindowHandle::Xcb{
                         connection:*connection,
                         visual,
                         window,
                         xcb_surface,
-                    }
+                    },
+                    surface,
+                    platform_surface,
+                    allocation_callbacks
                 }
             },
             _=>unimplemented!()
         }
     }
 }
-impl Drop for TestWindow{
-    fn drop(&mut self){//,window_manager_handle:&WindowManagerHandle, entry: &mut Entry, instance:&mut Instance){
-        //let surface=ash::extensions::khr::Surface::new(&self.entry,&self.instance);
+impl Drop for TestWindow<'_>{
+    fn drop(&mut self){
+        unsafe{
+            self.surface.destroy_surface(self.platform_surface,self.allocation_callbacks)
+        }
         match self.handle{
             #[cfg(target_os="windows")]
             TestWindowHandle::Windows{hwnd,..}=>{
@@ -288,6 +323,7 @@ enum WindowHandle{
     NeverMatch
 }
 struct Window{
+    extent:vk::Extent2D,
     handle:WindowHandle,
     surface:vk::SurfaceKHR,
     image_available:vk::Semaphore,
@@ -296,6 +332,8 @@ struct Window{
     swapchain:extensions::khr::Swapchain,
     swapchain_handle:vk::SwapchainKHR,
     swapchain_images:Vec<vk::Image>,
+    swapchain_image_views:Vec<vk::ImageView>,
+    swapchain_image_framebuffers:Vec<vk::Framebuffer>,
 }
 
 #[cfg(target_os="windows")]
@@ -484,6 +522,12 @@ struct WindowManager<'m>{
     frame_sync_fence:vk::Fence,
     staging_buffer:IntegratedBuffer,
     quad_data:Option<IntegratedBuffer>,
+    swapchain_surface_format:vk::SurfaceFormatKHR,
+    render_pass:vk::RenderPass,
+    graphics_pipeline_layout:vk::PipelineLayout,
+    graphics_pipeline:vk::Pipeline,
+    vertex_shader_module:vk::ShaderModule,
+    fragment_shader_module:vk::ShaderModule,
 }
 impl WindowManager<'_>{
     pub fn new()->Self{
@@ -503,7 +547,7 @@ impl WindowManager<'_>{
             application_version:vk::make_version(0,1,0),
             p_engine_name:engine_name.as_ptr() as *const i8,
             engine_version:vk::make_version(0,1,0),
-            api_version:vk::make_version(1,0,0),
+            api_version:vk::make_version(1,2,0),
             ..Default::default()
         };
         let instance_layers:Vec<&str>=vec![
@@ -534,7 +578,7 @@ impl WindowManager<'_>{
         //create test window with surface that has identical properties to the surfaces used for regular windows later on
         //required to test which device has a queue family that can present to these surfaces
         //the window will destroy itself at the end of this function
-        let test_window=TestWindow::new(&handle,&entry,&instance);
+        let test_window=TestWindow::new(&handle,&entry,&instance,allocation_callbacks);
 
         let device_layers:Vec<&str>=vec![
         ];
@@ -834,6 +878,221 @@ impl WindowManager<'_>{
         if memory==vk::DeviceMemory::null(){
             panic!("staging buffer has no memory")
         }
+        
+        //create render pass for simple rendering operations
+        let surface_formats=unsafe{
+            surface.get_physical_device_surface_formats(physical_device, test_window.platform_surface)
+        }.unwrap();
+        //use first available format, but check for two 'better' alternatives
+        let mut swapchain_surface_format=surface_formats[0];
+        //if the only supported format is 'undefined', there is no preferred format for the surface
+        //then use 'most widely used' format
+        if surface_formats.len()==1 && swapchain_surface_format.format==vk::Format::UNDEFINED{
+            swapchain_surface_format=vk::SurfaceFormatKHR{
+                format:vk::Format::R8G8B8A8_UNORM,
+                color_space:vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            };
+        }else{
+            for format in surface_formats.iter(){
+                if format.format==vk::Format::R8G8B8A8_UNORM{
+                    swapchain_surface_format=*format;
+                }
+            }
+        }
+
+        let render_pass_attachment_descriptions=vec![
+            vk::AttachmentDescription{
+                format:swapchain_surface_format.format,
+                samples:vk::SampleCountFlags::TYPE_1,
+                load_op:vk::AttachmentLoadOp::CLEAR,
+                store_op:vk::AttachmentStoreOp::STORE,
+                initial_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                final_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                ..Default::default()
+            }
+        ];
+        let render_pass_subpass_color_attachment_references=vec![
+            vk::AttachmentReference{
+                attachment:0,
+                layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            }
+        ];
+        let render_pass_subpass_descriptions=vec![
+            vk::SubpassDescription{
+                pipeline_bind_point:vk::PipelineBindPoint::GRAPHICS,
+                color_attachment_count:render_pass_subpass_color_attachment_references.len() as u32,
+                p_color_attachments:render_pass_subpass_color_attachment_references.as_ptr(),
+                ..Default::default()
+            }
+        ];
+        let render_pass_subpass_dependencies=vec![
+
+        ];
+        let render_pass_create_info=vk::RenderPassCreateInfo{
+            attachment_count:render_pass_attachment_descriptions.len() as u32,
+            p_attachments:render_pass_attachment_descriptions.as_ptr(),
+            subpass_count:render_pass_subpass_descriptions.len() as u32,
+            p_subpasses:render_pass_subpass_descriptions.as_ptr(),
+            dependency_count:render_pass_subpass_dependencies.len() as u32,
+            p_dependencies:render_pass_subpass_dependencies.as_ptr(),
+            ..Default::default()
+        };
+        let render_pass=unsafe{
+            device.create_render_pass(&render_pass_create_info,allocation_callbacks)
+        }.unwrap();
+
+        let graphics_pipeline_layout_create_info=vk::PipelineLayoutCreateInfo{
+            //descriptor set layouts
+            //push constant ranges
+            ..Default::default()
+        };
+        let graphics_pipeline_layout=unsafe{
+            device.create_pipeline_layout(&graphics_pipeline_layout_create_info,allocation_callbacks)
+        }.unwrap();
+
+        let vertex_shader_code=std::fs::read("vert.spv").unwrap();
+        let vertex_shader_create_info=vk::ShaderModuleCreateInfo{
+            code_size:vertex_shader_code.len(), //size in bytes
+            p_code:vertex_shader_code.as_ptr() as *const u32,//but pointer to 4byte unsigned integers
+            ..Default::default()
+        };
+        let vertex_shader_module=unsafe{
+            device.create_shader_module(&vertex_shader_create_info,allocation_callbacks)
+        }.unwrap();
+
+        let fragment_shader_code=std::fs::read("frag.spv").unwrap();
+        let fragment_shader_create_info=vk::ShaderModuleCreateInfo{
+            code_size:fragment_shader_code.len(),
+            p_code:fragment_shader_code.as_ptr() as *const u32,
+            ..Default::default()
+        };
+        let fragment_shader_module=unsafe{
+            device.create_shader_module(&fragment_shader_create_info,allocation_callbacks)
+        }.unwrap();
+
+        let shader_entry_fn_name="main".as_ptr() as *const i8;
+        let shader_stage_create_infos=vec![
+            vk::PipelineShaderStageCreateInfo{
+                stage:vk::ShaderStageFlags::VERTEX,
+                module:vertex_shader_module,
+                p_name:shader_entry_fn_name,
+                ..Default::default()
+            },
+            vk::PipelineShaderStageCreateInfo{
+                stage:vk::ShaderStageFlags::FRAGMENT,
+                module:fragment_shader_module,
+                p_name:shader_entry_fn_name,
+                ..Default::default()
+            }
+        ];
+        let vertex_binding_descriptions=vec![
+            vk::VertexInputBindingDescription{
+                binding: 0,
+                stride: std::mem::size_of::<VertexData>() as u32,
+                input_rate:vk::VertexInputRate::VERTEX,
+            },
+        ];
+        let vertex_attribute_descriptions=vec![
+            vk::VertexInputAttributeDescription{
+                location:0,
+                binding:vertex_binding_descriptions[0].binding,
+                format:vk::Format::R32G32B32A32_SFLOAT,
+                offset:offset_of!(VertexData,x) as u32,
+            },
+            vk::VertexInputAttributeDescription{
+                location:1,
+                binding:vertex_binding_descriptions[0].binding,
+                format:vk::Format::R32G32B32A32_SFLOAT,
+                offset:offset_of!(VertexData,r) as u32,
+            },
+        ];
+        let vertex_input_state_create_info=vk::PipelineVertexInputStateCreateInfo{
+            vertex_binding_description_count:vertex_binding_descriptions.len() as u32,
+            p_vertex_binding_descriptions:vertex_binding_descriptions.as_ptr(),
+            vertex_attribute_description_count:vertex_attribute_descriptions.len() as u32,
+            p_vertex_attribute_descriptions:vertex_attribute_descriptions.as_ptr(),
+            ..Default::default()
+        };
+        let input_assembly_state_create_info=vk::PipelineInputAssemblyStateCreateInfo{
+            topology:vk::PrimitiveTopology::TRIANGLE_STRIP,
+            primitive_restart_enable:false as u32,
+            ..Default::default()
+        };
+        let viewport=vk::Viewport{
+            x:0.0,
+            y:0.0,
+            width:500.0, //TODO BUT HARD (solve with dynamic pipeline state)
+            height:300.0, //TODO HARD AS WELL
+            min_depth:0.0,
+            max_depth:1.0,
+        };
+        let scissor=vk::Rect2D{
+            offset:vk::Offset2D{
+              x:0,
+              y:0,  
+            },
+            extent:vk::Extent2D{
+                width:500,//TODO HARD
+                height:300,//TODO HARD
+            }
+        };
+        let viewport_state_create_info=vk::PipelineViewportStateCreateInfo{
+            viewport_count:1,
+            p_viewports:&viewport,
+            scissor_count:1,
+            p_scissors:&scissor,
+            ..Default::default()
+        };
+        let rasterization_state_create_info=vk::PipelineRasterizationStateCreateInfo{
+            depth_clamp_enable:false as u32,
+            rasterizer_discard_enable:false as u32,
+            polygon_mode:vk::PolygonMode::FILL,
+            cull_mode: vk::CullModeFlags::BACK,
+            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+            depth_bias_enable:false as u32,
+            line_width:1.0,//specs state this must be 1.0 if wide lines feature is not enabled
+            ..Default::default()
+        };
+        let multisample_state_create_info=vk::PipelineMultisampleStateCreateInfo{
+            rasterization_samples:vk::SampleCountFlags::TYPE_1,
+            sample_shading_enable:false as u32,
+            alpha_to_coverage_enable:false as u32,
+            alpha_to_one_enable:false as u32,
+            ..Default::default()
+        };
+        let color_blend_attachment_state=vk::PipelineColorBlendAttachmentState{
+            blend_enable:false as u32,
+            ..Default::default()
+        };
+        let color_blend_state=vk::PipelineColorBlendStateCreateInfo{
+            logic_op_enable:false as u32,
+            logic_op:vk::LogicOp::COPY,
+            attachment_count:1,
+            p_attachments:&color_blend_attachment_state,
+            blend_constants:[0.0,0.0,0.0,0.0,],
+            ..Default::default()
+        };
+        let graphics_pipeline_create_info=vk::GraphicsPipelineCreateInfo{
+            stage_count:shader_stage_create_infos.len() as u32,
+            p_stages:shader_stage_create_infos.as_ptr(),
+            p_vertex_input_state:&vertex_input_state_create_info,
+            p_input_assembly_state:&input_assembly_state_create_info,
+            p_viewport_state:&viewport_state_create_info,
+            p_rasterization_state:&rasterization_state_create_info,
+            p_multisample_state:&multisample_state_create_info,
+            p_color_blend_state:&color_blend_state,
+            layout:graphics_pipeline_layout,
+            render_pass,
+            subpass:0,
+            base_pipeline_handle:vk::Pipeline::null(),
+            base_pipeline_index:-1,
+            ..Default::default()
+        };
+        let graphics_pipelines=unsafe{
+            device.create_graphics_pipelines(vk::PipelineCache::null(), &[graphics_pipeline_create_info],allocation_callbacks)
+        }.unwrap();
+        let graphics_pipeline=graphics_pipelines[0];
+
 
         //TODO
 
@@ -862,7 +1121,13 @@ impl WindowManager<'_>{
                 buffer,
                 memory,
             },
-            quad_data:None
+            quad_data:None,
+            swapchain_surface_format,
+            render_pass,
+            graphics_pipeline_layout,
+            graphics_pipeline,
+            vertex_shader_module,
+            fragment_shader_module,
         }
     }
 
@@ -904,13 +1169,9 @@ impl WindowManager<'_>{
             self.device.get_buffer_memory_requirements(buffer)
         };
 
-        let device_memory_properties=unsafe{
-            self.instance.get_physical_device_memory_properties(self.physical_device)
-        };
-
-        for memory_type_index in 0..device_memory_properties.memory_type_count{
+        for memory_type_index in 0..self.device_memory_properties.memory_type_count{
             if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
-            && device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::HOST_VISIBLE){
+            && self.device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::HOST_VISIBLE){
                 //allocate
                 let memory_allocate_info=vk::MemoryAllocateInfo{
                     allocation_size:buffer_memory_requirements.size,
@@ -957,13 +1218,9 @@ impl WindowManager<'_>{
             self.device.get_buffer_memory_requirements(buffer)
         };
 
-        let device_memory_properties=unsafe{
-            self.instance.get_physical_device_memory_properties(self.physical_device)
-        };
-
-        for memory_type_index in 0..device_memory_properties.memory_type_count{
+        for memory_type_index in 0..self.device_memory_properties.memory_type_count{
             if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
-            && device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::DEVICE_LOCAL){
+            && self.device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::DEVICE_LOCAL){
                 //allocate
                 let memory_allocate_info=vk::MemoryAllocateInfo{
                     allocation_size:buffer_memory_requirements.size,
@@ -1341,7 +1598,7 @@ impl WindowManager<'_>{
             pre_transform:swapchain_surface_transform,
             composite_alpha:vk::CompositeAlphaFlagsKHR::OPAQUE,
             present_mode:swapchain_surface_present_mode,
-            clipped:0u32,//false, but in c
+            clipped:false as u32,
             ..Default::default()
         };
         let swapchain=extensions::khr::Swapchain::new(&self.instance,&self.device);
@@ -1355,7 +1612,51 @@ impl WindowManager<'_>{
             swapchain.get_swapchain_images(swapchain_handle)
         }.unwrap();
 
+        let subresource_range=vk::ImageSubresourceRange{
+            aspect_mask:vk::ImageAspectFlags::COLOR,
+            base_mip_level:0,
+            level_count:1,
+            base_array_layer:0,
+            layer_count:1,
+            ..Default::default()
+        };     
+
+        let swapchain_image_views:Vec<vk::ImageView>=swapchain_images.iter().map(|image|{
+            let image_view_create_info=vk::ImageViewCreateInfo{
+                image:*image,
+                view_type:vk::ImageViewType::TYPE_2D,
+                format:self.swapchain_surface_format.format,
+                components:vk::ComponentMapping{
+                    r:vk::ComponentSwizzle::IDENTITY,
+                    g:vk::ComponentSwizzle::IDENTITY,
+                    b:vk::ComponentSwizzle::IDENTITY,
+                    a:vk::ComponentSwizzle::IDENTITY,
+                },
+                subresource_range,
+                ..Default::default()
+            };
+            unsafe{
+                self.device.create_image_view(&image_view_create_info, self.allocation_callbacks)
+            }.unwrap()
+        }).collect();
+
+        let swapchain_image_framebuffers:Vec<vk::Framebuffer>=swapchain_image_views.iter().map(|view|{
+            let framebuffer_create_info=vk::FramebufferCreateInfo{
+                render_pass:self.render_pass,
+                attachment_count:1,
+                p_attachments:view,
+                width:swapchain_extent.width,
+                height:swapchain_extent.height,
+                layers:1,
+                ..Default::default()
+            };
+            unsafe{
+                self.device.create_framebuffer(&framebuffer_create_info, self.allocation_callbacks)
+            }.unwrap()
+        }).collect();
+
         let window=Window{
+            extent:swapchain_extent,
             handle,
             surface,
             image_available,
@@ -1364,11 +1665,23 @@ impl WindowManager<'_>{
             swapchain,
             swapchain_handle,
             swapchain_images,
+            swapchain_image_views,
+            swapchain_image_framebuffers,
         };
         self.open_windows.push(window);
     }
     fn destroy_window(&mut self,open_window_index:usize){
         let window=&mut self.open_windows[open_window_index];
+        for framebuffer in window.swapchain_image_framebuffers.iter(){
+            unsafe{
+                self.device.destroy_framebuffer(*framebuffer, self.allocation_callbacks);
+            }
+        }
+        for image_view in window.swapchain_image_views.iter(){
+            unsafe{
+                self.device.destroy_image_view(*image_view, self.allocation_callbacks);
+            }
+        }
         unsafe{
             self.device.destroy_semaphore(window.image_available, self.allocation_callbacks);
             self.device.destroy_semaphore(window.image_transferable, self.allocation_callbacks);
@@ -1586,6 +1899,41 @@ impl WindowManager<'_>{
             ];
             self.quad_data=Some(self.upload_vertex_data(&vertex_data,self.graphics_queue_command_buffers[0]));
         }
+        //render quad
+        //begin render pass
+        let clear_value=vk::ClearValue{
+            color:vk::ClearColorValue{
+                float32:[1.0,0.5,0.1,1.0],
+            },
+        };
+        let render_pass_begin_info=vk::RenderPassBeginInfo{
+            render_pass:self.render_pass,
+            framebuffer:self.open_windows[0].swapchain_image_framebuffers[image_index as usize],
+            render_area:vk::Rect2D{
+                offset:vk::Offset2D{
+                    x:0,
+                    y:0,
+                },
+                extent:vk::Extent2D{
+                    width:self.open_windows[0].extent.width,
+                    height:self.open_windows[0].extent.height,
+                }
+            },
+            clear_value_count:1,
+            p_clear_values:&clear_value,
+            ..Default::default()
+        };
+        unsafe{
+            self.device.cmd_begin_render_pass(self.graphics_queue_command_buffers[0], &render_pass_begin_info, vk::SubpassContents::INLINE)
+        };
+        //bind pipeline
+        //todo!("bind pipeline");
+        //draw
+        //todo!("draw");
+        //end render pass
+        unsafe{
+            self.device.cmd_end_render_pass(self.graphics_queue_command_buffers[0])
+        };
         //end
         unsafe{
             self.device.end_command_buffer(self.graphics_queue_command_buffers[0])
@@ -1714,17 +2062,32 @@ impl Drop for WindowManager<'_>{
         }
 
         unsafe{
+            self.device.destroy_pipeline(self.graphics_pipeline, self.allocation_callbacks);
+            
+            self.device.destroy_pipeline_layout(self.graphics_pipeline_layout, self.allocation_callbacks);
+
+            self.device.destroy_shader_module(self.vertex_shader_module,self.allocation_callbacks);
+            self.device.destroy_shader_module(self.fragment_shader_module,self.allocation_callbacks);
+
+            self.device.destroy_render_pass(self.render_pass, self.allocation_callbacks);
+
             if let Some(quad_data)=&self.quad_data{
                 self.device.free_memory(quad_data.memory,self.allocation_callbacks);
                 self.device.destroy_buffer(quad_data.buffer, self.allocation_callbacks);
             }
+
             self.device.free_memory(self.staging_buffer.memory,self.allocation_callbacks);
             self.device.destroy_buffer(self.staging_buffer.buffer, self.allocation_callbacks);
+
             self.device.destroy_fence(self.frame_sync_fence, self.allocation_callbacks);
+
             self.device.destroy_semaphore(self.rendering_done,self.allocation_callbacks);
+
             self.device.destroy_command_pool(self.graphics_queue_command_pool, self.allocation_callbacks);
             self.device.destroy_command_pool(self.present_queue_command_pool, self.allocation_callbacks);
+
             self.device.destroy_device(self.allocation_callbacks);
+
             self.instance.destroy_instance(self.allocation_callbacks)
         };
 
