@@ -77,26 +77,31 @@ use ash::{
     extensions,
 };
 
+#[allow(dead_code)]
 #[derive(PartialEq,Debug,Clone,Copy)]
 enum ControlFlow{
     Continue,
     Stop,
 }
+#[allow(dead_code)]
 #[derive(PartialEq,Debug,Clone,Copy)]
 enum ButtonKeyState{
     Pressed,
     Released,
 }
+#[allow(dead_code)]
 #[derive(PartialEq,Debug,Clone,Copy)]
 enum EnterLeave{
     Enter,
     Leave,
 }
+#[allow(dead_code)]
 #[derive(PartialEq,Debug,Clone,Copy)]
 enum FocusChange{
     Gained,
     Lost,
 }
+#[allow(dead_code)]
 #[derive(PartialEq,Debug,Clone,Copy)]
 enum Event{
     FirstEvent,
@@ -306,6 +311,7 @@ enum WindowHandle{
     #[cfg(target_os="windows")]
     Windows{
         hwnd:HWND,
+        #[allow(dead_code)]
         win32_surface:extensions::khr::Win32Surface,
     },
     #[cfg(target_os="linux")]
@@ -313,6 +319,7 @@ enum WindowHandle{
         connection:*mut base::xcb_connection_t,
         visual:xproto::xcb_visualid_t,
         window:u32,
+        #[allow(dead_code)]
         xcb_surface:ash::extensions::khr::XcbSurface,
         close:xcb_atom_t,
         maximized_horizontal:xcb_atom_t,
@@ -349,6 +356,7 @@ unsafe extern "system" fn windowproc(window:HWND,umsg:u32,wparam:WPARAM,lparam:L
     }
 }
 
+#[allow(dead_code)]
 struct VertexData{
     x:f32,
     y:f32,
@@ -392,6 +400,7 @@ struct IntegratedBuffer{
 
 struct Decoder{
     allocation_callbacks:Option<vk::AllocationCallbacks>,
+    #[allow(dead_code)]
     instance:Instance,
     device:Device,
     device_memory_properties:vk::PhysicalDeviceMemoryProperties,
@@ -613,6 +622,7 @@ impl Drop for Decoder{
 }
 struct Painter{
     allocation_callbacks:Option<vk::AllocationCallbacks>,
+    #[allow(dead_code)]
     instance:Instance,
     device:Device,
     swapchain_surface_format:vk::SurfaceFormatKHR,
@@ -1401,6 +1411,7 @@ impl Manager{
         }
     }
 
+    #[allow(dead_code)]
     pub fn create_semaphore(&self)->VkResult<vk::Semaphore>{
         let semaphore_create_info=vk::SemaphoreCreateInfo{
             ..Default::default()
@@ -1409,6 +1420,8 @@ impl Manager{
             self.device.create_semaphore(&semaphore_create_info,self.get_allocation_callbacks())
         }
     }
+
+    #[allow(dead_code)]
     pub fn create_fence(&self,signaled:bool)->VkResult<vk::Fence>{
         let fence_create_info=vk::FenceCreateInfo{
             flags:if signaled{
