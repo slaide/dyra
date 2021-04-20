@@ -6,6 +6,4 @@ fn main(){
     //add flags in the future to optimize shaders? using spirv-tools optimizer (spirv-opt) as part of lunarg-sdk
     println!("cargo:rerun-if-changed=shader.frag");
     println!("cargo:rerun-if-changed=shader.vert");
-    println!("cargo:rerun-if-changed=vert.spv");
-    println!("cargo:rerun-if-changed=frag.spv");
 }
