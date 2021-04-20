@@ -382,10 +382,268 @@ impl VertexData{
         }
     }
 }
+
+#[derive(Debug,Clone,Copy)]
 struct IntegratedBuffer{
     size:u64,
     buffer:vk::Buffer,
     memory:vk::DeviceMemory,
+}
+
+struct Decoder{
+    allocation_callbacks:Option<vk::AllocationCallbacks>,
+    instance:Instance,
+    device:Device,
+    device_memory_properties:vk::PhysicalDeviceMemoryProperties,
+
+    staging_buffer:IntegratedBuffer,
+
+    meshes:std::collections::HashMap<&'static str,IntegratedBuffer>,
+
+    vertex_shaders:std::collections::HashMap<&'static str,vk::ShaderModule>,
+    fragment_shaders:std::collections::HashMap<&'static str,vk::ShaderModule>,
+}
+impl Decoder{
+    fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
+        self.allocation_callbacks.as_ref()
+    }
+    pub fn get_quad(&mut self,command_buffer:vk::CommandBuffer)->IntegratedBuffer{
+        if let Some(quad)=self.meshes.get("quad"){
+            return *quad;
+        }else{
+            let quad_data=vec![
+                VertexData::new(
+                  -0.7, -0.7, 0.0, 1.0,
+                  1.0, 0.0, 0.0, 0.0
+                ),
+                VertexData::new(
+                  -0.7, 0.7, 0.0, 1.0,
+                  0.0, 1.0, 0.0, 0.0
+                ),
+                VertexData::new(
+                  0.7, -0.7, 0.0, 1.0,
+                  0.0, 0.0, 1.0, 0.0
+                ),
+                VertexData::new(
+                  0.7, 0.7, 0.0, 1.0,
+                  0.3, 0.3, 0.3, 0.0
+                )
+            ];
+            let quad=self.upload_vertex_data(&quad_data,command_buffer);
+            self.meshes.insert("quad",quad);
+            return quad;
+        }
+    }
+    pub fn upload_vertex_data(&mut self,vertex_data:&Vec<VertexData>,command_buffer:vk::CommandBuffer)->IntegratedBuffer{
+        let size=(vertex_data.len() * std::mem::size_of::<VertexData>()) as u64;
+        let buffer_create_info=vk::BufferCreateInfo{
+            size,
+            usage:vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            sharing_mode:vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+        let buffer=unsafe{
+            self.device.create_buffer(&buffer_create_info,self.get_allocation_callbacks())
+        }.unwrap();
+
+        let mut memory=vk::DeviceMemory::null();
+
+        let buffer_memory_requirements=unsafe{
+            self.device.get_buffer_memory_requirements(buffer)
+        };
+
+        for memory_type_index in 0..self.device_memory_properties.memory_type_count{
+            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
+            && self.device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::DEVICE_LOCAL){
+                //allocate
+                let memory_allocate_info=vk::MemoryAllocateInfo{
+                    allocation_size:buffer_memory_requirements.size,
+                    memory_type_index,
+                    ..Default::default()
+                };
+                memory=unsafe{
+                    self.device.allocate_memory(&memory_allocate_info,self.get_allocation_callbacks())
+                }.unwrap();
+
+                //bind
+                let memory_offset=0;
+                unsafe{
+                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
+                }.unwrap();
+
+                //map staging (!)
+                let memory_pointer=unsafe{
+                    self.device.map_memory(self.staging_buffer.memory,0,size,vk::MemoryMapFlags::empty())
+                }.unwrap();
+
+                //memcpy
+                unsafe{
+                    libc::memcpy(memory_pointer,vertex_data.as_ptr() as *const libc::c_void,size as usize);
+                }
+
+                //flush
+                let flush_range=vk::MappedMemoryRange{
+                    memory:self.staging_buffer.memory,
+                    offset:0,
+                    size,
+                    ..Default::default()
+                };
+                unsafe{
+                    self.device.flush_mapped_memory_ranges(&[flush_range])
+                }.unwrap();
+
+                //unmap
+                unsafe{
+                    self.device.unmap_memory(self.staging_buffer.memory);
+                }
+
+                let buffer_memory_barrier = vk::BufferMemoryBarrier{
+                    src_access_mask:vk::AccessFlags::MEMORY_WRITE,
+                    dst_access_mask:vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                    buffer,
+                    offset: 0,
+                    size,
+                    ..Default::default()
+                  };
+
+                unsafe{
+                    self.device.cmd_copy_buffer(command_buffer,self.staging_buffer.buffer,buffer,&[
+                        vk::BufferCopy{
+                            src_offset:0,
+                            dst_offset:0,
+                            size,
+                        }
+                    ]);
+
+                    //perform buffer layout transition from copy target to vertex data source
+                    self.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &[buffer_memory_barrier], &[]);
+                };
+
+                break;
+            }
+        }
+        if memory==vk::DeviceMemory::null(){
+            panic!("staging buffer has no memory")
+        }
+
+        IntegratedBuffer{
+            size,
+            buffer,
+            memory,
+        }
+    }
+    /*
+    pub fn new_staging(&mut self,size:u64)->IntegratedBuffer{
+        let buffer_create_info=vk::BufferCreateInfo{
+            size:size,
+            usage:vk::BufferUsageFlags::TRANSFER_SRC,
+            sharing_mode:vk::SharingMode::EXCLUSIVE,
+            ..Default::default()
+        };
+        let buffer=unsafe{
+            self.device.create_buffer(&buffer_create_info,self.allocation_callbacks)
+        }.unwrap();
+
+        let mut memory=vk::DeviceMemory::null();
+
+        let buffer_memory_requirements=unsafe{
+            self.device.get_buffer_memory_requirements(buffer)
+        };
+
+        for memory_type_index in 0..self.device_memory_properties.memory_type_count{
+            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
+            && self.device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::HOST_VISIBLE){
+                //allocate
+                let memory_allocate_info=vk::MemoryAllocateInfo{
+                    allocation_size:buffer_memory_requirements.size,
+                    memory_type_index,
+                    ..Default::default()
+                };
+                memory=unsafe{
+                    self.device.allocate_memory(&memory_allocate_info,self.allocation_callbacks)
+                }.unwrap();
+                //bind
+                let memory_offset=0;
+                unsafe{
+                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
+                }.unwrap();
+
+                break;
+            }
+        }
+        if memory==vk::DeviceMemory::null(){
+            panic!("staging buffer has no memory")
+        }
+
+        IntegratedBuffer{
+            size,
+            buffer,
+            memory,
+        }
+    }
+    */
+}
+impl Drop for Decoder{
+    fn drop(&mut self){
+        for (_name,shader) in self.vertex_shaders.iter(){
+            unsafe{
+                self.device.destroy_shader_module(*shader,self.get_allocation_callbacks());
+            }
+        }
+        for (_name,shader) in self.fragment_shaders.iter(){
+            unsafe{
+                self.device.destroy_shader_module(*shader,self.get_allocation_callbacks());
+            }
+        }
+        for (_name,mesh) in self.meshes.iter(){
+            unsafe{
+                self.device.free_memory(mesh.memory,self.get_allocation_callbacks());
+                self.device.destroy_buffer(mesh.buffer, self.get_allocation_callbacks());
+            }
+        }
+
+        unsafe{
+            self.device.free_memory(self.staging_buffer.memory,self.get_allocation_callbacks());
+            self.device.destroy_buffer(self.staging_buffer.buffer, self.get_allocation_callbacks());
+        }
+
+    }
+}
+struct Painter{
+    allocation_callbacks:Option<vk::AllocationCallbacks>,
+    instance:Instance,
+    device:Device,
+    swapchain_surface_format:vk::SurfaceFormatKHR,
+    render_pass:vk::RenderPass,
+    graphics_pipeline_layout:vk::PipelineLayout,
+    graphics_pipeline:vk::Pipeline,
+    rendering_done:vk::Semaphore,
+    graphics_queue:vk::Queue,
+    graphics_queue_family_index:u32,
+    graphics_queue_command_pool:vk::CommandPool,
+    graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
+}
+impl Drop for Painter{
+    fn drop(&mut self){
+        unsafe{
+            self.device.destroy_pipeline(self.graphics_pipeline, self.get_allocation_callbacks());
+            
+            self.device.destroy_pipeline_layout(self.graphics_pipeline_layout, self.get_allocation_callbacks());
+
+            self.device.destroy_render_pass(self.render_pass, self.get_allocation_callbacks());
+
+            self.device.destroy_semaphore(self.rendering_done,self.get_allocation_callbacks());
+
+            self.device.destroy_command_pool(self.graphics_queue_command_pool, self.get_allocation_callbacks());
+        }
+    }
+}
+impl Painter{
+    fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
+        self.allocation_callbacks.as_ref()
+    }
 }
 
 enum WindowManagerHandle{
@@ -500,38 +758,33 @@ impl WindowManagerHandle{
         }
     }
 }
-struct WindowManager<'m>{
-    handle:WindowManagerHandle,
+struct Manager{
+    window_manager_handle:WindowManagerHandle,
     open_windows:Vec<Window>,
     entry:Entry,
-    allocation_callbacks:Option<&'m AllocationCallbacks>,
+    allocation_callbacks:Option<AllocationCallbacks>,
     instance:Instance,
     physical_device:PhysicalDevice,
-    device_memory_properties:vk::PhysicalDeviceMemoryProperties,
     device:Device,
+
     surface:extensions::khr::Surface,
     present_queue:vk::Queue,
     present_queue_family_index:u32,
     present_queue_command_pool:vk::CommandPool,
     present_queue_command_buffers:Vec<vk::CommandBuffer>,
-    graphics_queue:vk::Queue,
-    graphics_queue_family_index:u32,
-    graphics_queue_command_pool:vk::CommandPool,
-    graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
-    rendering_done:vk::Semaphore,
     frame_sync_fence:vk::Fence,
-    staging_buffer:IntegratedBuffer,
-    quad_data:Option<IntegratedBuffer>,
+
     swapchain_surface_format:vk::SurfaceFormatKHR,
-    render_pass:vk::RenderPass,
-    graphics_pipeline_layout:vk::PipelineLayout,
-    graphics_pipeline:vk::Pipeline,
-    vertex_shader_module:vk::ShaderModule,
-    fragment_shader_module:vk::ShaderModule,
+
+    painter:std::mem::ManuallyDrop<Painter>,
+    decoder:std::mem::ManuallyDrop<Decoder>,
 }
-impl WindowManager<'_>{
+impl Manager{
+    fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
+        self.allocation_callbacks.as_ref()
+    }
     pub fn new()->Self{
-        let handle=WindowManagerHandle::new();
+        let window_manager_handle=WindowManagerHandle::new();
         let open_windows=Vec::new();
 
         let entry=unsafe{
@@ -540,7 +793,8 @@ impl WindowManager<'_>{
         let application_name="my application";
         let engine_name="my engine";
 
-        let allocation_callbacks=None;
+        let allocation_callbacks:Option<vk::AllocationCallbacks>=None;
+        let temp_allocation_callbacks=allocation_callbacks.as_ref();
 
         let app_info=vk::ApplicationInfo{
             p_application_name:application_name.as_ptr() as *const i8,
@@ -572,13 +826,13 @@ impl WindowManager<'_>{
         };
 
         let instance=unsafe{
-            entry.create_instance(&instance_info,allocation_callbacks).unwrap()
+            entry.create_instance(&instance_info,temp_allocation_callbacks).unwrap()
         };
 
         //create test window with surface that has identical properties to the surfaces used for regular windows later on
         //required to test which device has a queue family that can present to these surfaces
         //the window will destroy itself at the end of this function
-        let test_window=TestWindow::new(&handle,&entry,&instance,allocation_callbacks);
+        let test_window=TestWindow::new(&window_manager_handle,&entry,&instance,temp_allocation_callbacks);
 
         let device_layers:Vec<&str>=vec![
         ];
@@ -753,7 +1007,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let device=unsafe{
-            instance.create_device(physical_device,&device_create_info,allocation_callbacks)
+            instance.create_device(physical_device,&device_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         queue_priorities_storage.clear();
@@ -788,10 +1042,10 @@ impl WindowManager<'_>{
         };
 
         let present_queue_command_pool=unsafe{
-            device.create_command_pool(&present_queue_command_pool_create_info,allocation_callbacks)
+            device.create_command_pool(&present_queue_command_pool_create_info,temp_allocation_callbacks)
         }.unwrap();
         let graphics_queue_command_pool=unsafe{
-            device.create_command_pool(&graphics_queue_command_pool_create_info,allocation_callbacks)
+            device.create_command_pool(&graphics_queue_command_pool_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         //create command buffers for each command pool
@@ -819,7 +1073,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let rendering_done=unsafe{
-            device.create_semaphore(&semaphore_create_info,allocation_callbacks)
+            device.create_semaphore(&semaphore_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         //used to wait for last frame to be finished (and synchronized with max framerate) before new frame starts
@@ -829,7 +1083,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let frame_sync_fence=unsafe{
-            device.create_fence(&fence_create_info,allocation_callbacks)
+            device.create_fence(&fence_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         //create staging buffer for resource upload
@@ -841,7 +1095,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let buffer=unsafe{
-            device.create_buffer(&buffer_create_info,allocation_callbacks)
+            device.create_buffer(&buffer_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         let mut memory=vk::DeviceMemory::null();
@@ -864,7 +1118,7 @@ impl WindowManager<'_>{
                     ..Default::default()
                 };
                 memory=unsafe{
-                    device.allocate_memory(&memory_allocate_info,allocation_callbacks)
+                    device.allocate_memory(&memory_allocate_info,temp_allocation_callbacks)
                 }.unwrap();
                 //bind
                 let memory_offset=0;
@@ -938,7 +1192,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let render_pass=unsafe{
-            device.create_render_pass(&render_pass_create_info,allocation_callbacks)
+            device.create_render_pass(&render_pass_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         let graphics_pipeline_layout_create_info=vk::PipelineLayoutCreateInfo{
@@ -947,7 +1201,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let graphics_pipeline_layout=unsafe{
-            device.create_pipeline_layout(&graphics_pipeline_layout_create_info,allocation_callbacks)
+            device.create_pipeline_layout(&graphics_pipeline_layout_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         let vertex_shader_code=std::fs::read("vert.spv").unwrap();
@@ -957,7 +1211,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let vertex_shader_module=unsafe{
-            device.create_shader_module(&vertex_shader_create_info,allocation_callbacks)
+            device.create_shader_module(&vertex_shader_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         let fragment_shader_code=std::fs::read("frag.spv").unwrap();
@@ -967,7 +1221,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let fragment_shader_module=unsafe{
-            device.create_shader_module(&fragment_shader_create_info,allocation_callbacks)
+            device.create_shader_module(&fragment_shader_create_info,temp_allocation_callbacks)
         }.unwrap();
 
         let shader_entry_fn_name="main\0".as_ptr() as *const i8;
@@ -1088,45 +1342,62 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         let graphics_pipelines=unsafe{
-            device.create_graphics_pipelines(vk::PipelineCache::null(), &[graphics_pipeline_create_info],allocation_callbacks)
+            device.create_graphics_pipelines(vk::PipelineCache::null(), &[graphics_pipeline_create_info],temp_allocation_callbacks)
         }.unwrap();
         let graphics_pipeline=graphics_pipelines[0];
 
+        let mut vertex_shaders=std::collections::HashMap::new();
+        vertex_shaders.insert("quad.vert.spv",vertex_shader_module);
+        let mut fragment_shaders=std::collections::HashMap::new();
+        fragment_shaders.insert("quad.frag.spv",fragment_shader_module);
 
         //TODO
 
         Self{
-            handle,
+            window_manager_handle,
             open_windows,
             entry,
             allocation_callbacks,
-            instance,
+            instance:instance.clone(),
             physical_device,
-            device_memory_properties,
-            device,
+            device:device.clone(),
             surface,
             present_queue,
             present_queue_family_index,
             present_queue_command_pool,
             present_queue_command_buffers,
-            graphics_queue,
-            graphics_queue_family_index,
-            graphics_queue_command_pool,
-            graphics_queue_command_buffers,
-            rendering_done,
             frame_sync_fence,
-            staging_buffer:IntegratedBuffer{
-                size:buffer_size,
-                buffer,
-                memory,
-            },
-            quad_data:None,
             swapchain_surface_format,
-            render_pass,
-            graphics_pipeline_layout,
-            graphics_pipeline,
-            vertex_shader_module,
-            fragment_shader_module,
+
+            painter:std::mem::ManuallyDrop::new(Painter{
+                allocation_callbacks,
+                instance:instance.clone(),
+                device:device.clone(),
+                swapchain_surface_format,
+                render_pass,
+                graphics_pipeline_layout,
+                graphics_pipeline,
+                rendering_done,
+                graphics_queue,
+                graphics_queue_family_index,
+                graphics_queue_command_pool,
+                graphics_queue_command_buffers,
+            }),
+
+            decoder:std::mem::ManuallyDrop::new(Decoder{
+                allocation_callbacks,
+                instance:instance.clone(),
+                device:device.clone(),
+                device_memory_properties,
+                staging_buffer:IntegratedBuffer{
+                    size:buffer_size,
+                    buffer,
+                    memory,
+                },
+                meshes:std::collections::HashMap::new(),
+                vertex_shaders,
+                fragment_shaders,
+            })
         }
     }
 
@@ -1135,7 +1406,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         unsafe{
-            self.device.create_semaphore(&semaphore_create_info,self.allocation_callbacks)
+            self.device.create_semaphore(&semaphore_create_info,self.get_allocation_callbacks())
         }
     }
     pub fn create_fence(&self,signaled:bool)->VkResult<vk::Fence>{
@@ -1148,162 +1419,14 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         unsafe{
-            self.device.create_fence(&fence_create_info,self.allocation_callbacks)
-        }
-    }
-    pub fn new_staging(&mut self,size:u64)->IntegratedBuffer{
-        let buffer_create_info=vk::BufferCreateInfo{
-            size:size,
-            usage:vk::BufferUsageFlags::TRANSFER_SRC,
-            sharing_mode:vk::SharingMode::EXCLUSIVE,
-            ..Default::default()
-        };
-        let buffer=unsafe{
-            self.device.create_buffer(&buffer_create_info,self.allocation_callbacks)
-        }.unwrap();
-
-        let mut memory=vk::DeviceMemory::null();
-
-        let buffer_memory_requirements=unsafe{
-            self.device.get_buffer_memory_requirements(buffer)
-        };
-
-        for memory_type_index in 0..self.device_memory_properties.memory_type_count{
-            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
-            && self.device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::HOST_VISIBLE){
-                //allocate
-                let memory_allocate_info=vk::MemoryAllocateInfo{
-                    allocation_size:buffer_memory_requirements.size,
-                    memory_type_index,
-                    ..Default::default()
-                };
-                memory=unsafe{
-                    self.device.allocate_memory(&memory_allocate_info,self.allocation_callbacks)
-                }.unwrap();
-                //bind
-                let memory_offset=0;
-                unsafe{
-                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
-                }.unwrap();
-
-                break;
-            }
-        }
-        if memory==vk::DeviceMemory::null(){
-            panic!("staging buffer has no memory")
-        }
-
-        IntegratedBuffer{
-            size,
-            buffer,
-            memory,
-        }
-    }
-    pub fn upload_vertex_data(&mut self,vertex_data:&Vec<VertexData>,command_buffer:vk::CommandBuffer)->IntegratedBuffer{
-        let size=(vertex_data.len() * std::mem::size_of::<VertexData>()) as u64;
-        let buffer_create_info=vk::BufferCreateInfo{
-            size,
-            usage:vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            sharing_mode:vk::SharingMode::EXCLUSIVE,
-            ..Default::default()
-        };
-        let buffer=unsafe{
-            self.device.create_buffer(&buffer_create_info,self.allocation_callbacks)
-        }.unwrap();
-
-        let mut memory=vk::DeviceMemory::null();
-
-        let buffer_memory_requirements=unsafe{
-            self.device.get_buffer_memory_requirements(buffer)
-        };
-
-        for memory_type_index in 0..self.device_memory_properties.memory_type_count{
-            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
-            && self.device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::DEVICE_LOCAL){
-                //allocate
-                let memory_allocate_info=vk::MemoryAllocateInfo{
-                    allocation_size:buffer_memory_requirements.size,
-                    memory_type_index,
-                    ..Default::default()
-                };
-                memory=unsafe{
-                    self.device.allocate_memory(&memory_allocate_info,self.allocation_callbacks)
-                }.unwrap();
-
-                //bind
-                let memory_offset=0;
-                unsafe{
-                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
-                }.unwrap();
-
-                //map staging (!)
-                let memory_pointer=unsafe{
-                    self.device.map_memory(self.staging_buffer.memory,0,size,vk::MemoryMapFlags::empty())
-                }.unwrap();
-
-                //memcpy
-                unsafe{
-                    libc::memcpy(memory_pointer,vertex_data.as_ptr() as *const libc::c_void,size as usize);
-                }
-
-                //flush
-                let flush_range=vk::MappedMemoryRange{
-                    memory:self.staging_buffer.memory,
-                    offset:0,
-                    size,
-                    ..Default::default()
-                };
-                unsafe{
-                    self.device.flush_mapped_memory_ranges(&[flush_range])
-                }.unwrap();
-
-                //unmap
-                unsafe{
-                    self.device.unmap_memory(self.staging_buffer.memory);
-                }
-
-                let buffer_memory_barrier = vk::BufferMemoryBarrier{
-                    src_access_mask:vk::AccessFlags::MEMORY_WRITE,
-                    dst_access_mask:vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
-                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                    buffer,
-                    offset: 0,
-                    size,
-                    ..Default::default()
-                  };
-
-                unsafe{
-                    self.device.cmd_copy_buffer(command_buffer,self.staging_buffer.buffer,buffer,&[
-                        vk::BufferCopy{
-                            src_offset:0,
-                            dst_offset:0,
-                            size,
-                        }
-                    ]);
-
-                    //perform buffer layout transition from copy target to vertex data source
-                    self.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &[buffer_memory_barrier], &[]);
-                };
-
-                break;
-            }
-        }
-        if memory==vk::DeviceMemory::null(){
-            panic!("staging buffer has no memory")
-        }
-
-        IntegratedBuffer{
-            size,
-            buffer,
-            memory,
+            self.device.create_fence(&fence_create_info,self.get_allocation_callbacks())
         }
     }
 
     pub fn new_window(&mut self,width:u16,height:u16,title:&str){
         let surface;
         let handle={
-            match &self.handle{
+            match &self.window_manager_handle{
                 #[cfg(target_os="windows")]
                 WindowManagerHandle::Windows{hinstance,class_name}=>{
                     let window_hwnd:HWND=unsafe{
@@ -1339,7 +1462,7 @@ impl WindowManager<'_>{
                         ..Default::default()
                     };
                     surface=unsafe{
-                        win32_surface.create_win32_surface(&surface_create_info,self.allocation_callbacks)
+                        win32_surface.create_win32_surface(&surface_create_info,self.get_allocation_callbacks())
                     }.unwrap();
 
                     WindowHandle::Windows{
@@ -1616,7 +1739,7 @@ impl WindowManager<'_>{
         };
         let swapchain=extensions::khr::Swapchain::new(&self.instance,&self.device);
         let swapchain_handle=unsafe{
-            swapchain.create_swapchain(&swapchain_create_info, self.allocation_callbacks)
+            swapchain.create_swapchain(&swapchain_create_info, self.get_allocation_callbacks())
         }.unwrap();
 
         //images may only be created when this function is valled, so presenting an image index before
@@ -1649,13 +1772,13 @@ impl WindowManager<'_>{
                 ..Default::default()
             };
             unsafe{
-                self.device.create_image_view(&image_view_create_info, self.allocation_callbacks)
+                self.device.create_image_view(&image_view_create_info, self.get_allocation_callbacks())
             }.unwrap()
         }).collect();
 
         let swapchain_image_framebuffers:Vec<vk::Framebuffer>=swapchain_image_views.iter().map(|view|{
             let framebuffer_create_info=vk::FramebufferCreateInfo{
-                render_pass:self.render_pass,
+                render_pass:self.painter.render_pass,
                 attachment_count:1,
                 p_attachments:view,
                 width:swapchain_extent.width,
@@ -1664,7 +1787,7 @@ impl WindowManager<'_>{
                 ..Default::default()
             };
             unsafe{
-                self.device.create_framebuffer(&framebuffer_create_info, self.allocation_callbacks)
+                self.device.create_framebuffer(&framebuffer_create_info, self.get_allocation_callbacks())
             }.unwrap()
         }).collect();
 
@@ -1684,25 +1807,24 @@ impl WindowManager<'_>{
         self.open_windows.push(window);
     }
     fn destroy_window(&mut self,open_window_index:usize){
-        let window=&mut self.open_windows[open_window_index];
-        for framebuffer in window.swapchain_image_framebuffers.iter(){
+        for framebuffer in self.open_windows[open_window_index].swapchain_image_framebuffers.iter(){
             unsafe{
-                self.device.destroy_framebuffer(*framebuffer, self.allocation_callbacks);
+                self.device.destroy_framebuffer(*framebuffer, self.get_allocation_callbacks());
             }
         }
-        for image_view in window.swapchain_image_views.iter(){
+        for image_view in self.open_windows[open_window_index].swapchain_image_views.iter(){
             unsafe{
-                self.device.destroy_image_view(*image_view, self.allocation_callbacks);
+                self.device.destroy_image_view(*image_view, self.get_allocation_callbacks());
             }
         }
         unsafe{
-            self.device.destroy_semaphore(window.image_available, self.allocation_callbacks);
-            self.device.destroy_semaphore(window.image_transferable, self.allocation_callbacks);
-            self.device.destroy_semaphore(window.image_presentable, self.allocation_callbacks);
-            window.swapchain.destroy_swapchain(window.swapchain_handle,self.allocation_callbacks);
-            self.surface.destroy_surface(window.surface,self.allocation_callbacks)
+            self.device.destroy_semaphore(self.open_windows[open_window_index].image_available, self.get_allocation_callbacks());
+            self.device.destroy_semaphore(self.open_windows[open_window_index].image_transferable, self.get_allocation_callbacks());
+            self.device.destroy_semaphore(self.open_windows[open_window_index].image_presentable, self.get_allocation_callbacks());
+            self.open_windows[open_window_index].swapchain.destroy_swapchain(self.open_windows[open_window_index].swapchain_handle,self.get_allocation_callbacks());
+            self.surface.destroy_surface(self.open_windows[open_window_index].surface,self.get_allocation_callbacks())
         };
-        match window.handle{
+        match self.open_windows[open_window_index].handle{
             #[cfg(target_os="windows")]
             WindowHandle::Windows{hwnd,..}=>{
                 unsafe{
@@ -1720,7 +1842,7 @@ impl WindowManager<'_>{
     }
 
     pub fn step(&mut self)->ControlFlow{
-        match self.handle{
+        match self.window_manager_handle{
             #[cfg(target_os="windows")]
             WindowManagerHandle::Windows{..}=>{
                 let mut msg:MSG=unsafe{
@@ -1887,31 +2009,11 @@ impl WindowManager<'_>{
         //record graphics command buffer
         //begin
         unsafe{
-            self.device.begin_command_buffer(self.graphics_queue_command_buffers[0], &graphics_queue_command_buffer_begin_info)
+            self.device.begin_command_buffer(self.painter.graphics_queue_command_buffers[0], &graphics_queue_command_buffer_begin_info)
         }.unwrap();
 
         //record upload, if required
-        if self.quad_data.is_none(){
-            let vertex_data=vec![
-                VertexData::new(
-                  -0.7, -0.7, 0.0, 1.0,
-                  1.0, 0.0, 0.0, 0.0
-                ),
-                VertexData::new(
-                  -0.7, 0.7, 0.0, 1.0,
-                  0.0, 1.0, 0.0, 0.0
-                ),
-                VertexData::new(
-                  0.7, -0.7, 0.0, 1.0,
-                  0.0, 0.0, 1.0, 0.0
-                ),
-                VertexData::new(
-                  0.7, 0.7, 0.0, 1.0,
-                  0.3, 0.3, 0.3, 0.0
-                )
-            ];
-            self.quad_data=Some(self.upload_vertex_data(&vertex_data,self.graphics_queue_command_buffers[0]));
-        }
+        let quad_data=self.decoder.get_quad(self.painter.graphics_queue_command_buffers[0]);
         //render quad
         //begin render pass
         let clear_value=vk::ClearValue{
@@ -1920,7 +2022,7 @@ impl WindowManager<'_>{
             },
         };
         let render_pass_begin_info=vk::RenderPassBeginInfo{
-            render_pass:self.render_pass,
+            render_pass:self.painter.render_pass,
             framebuffer:self.open_windows[0].swapchain_image_framebuffers[image_index as usize],
             render_area:vk::Rect2D{
                 offset:vk::Offset2D{
@@ -1937,11 +2039,11 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         unsafe{
-            self.device.cmd_begin_render_pass(self.graphics_queue_command_buffers[0], &render_pass_begin_info, vk::SubpassContents::INLINE)
+            self.device.cmd_begin_render_pass(self.painter.graphics_queue_command_buffers[0], &render_pass_begin_info, vk::SubpassContents::INLINE)
         };
         //bind pipeline
         unsafe{
-            self.device.cmd_bind_pipeline(self.graphics_queue_command_buffers[0],vk::PipelineBindPoint::GRAPHICS,self.graphics_pipeline);
+            self.device.cmd_bind_pipeline(self.painter.graphics_queue_command_buffers[0],vk::PipelineBindPoint::GRAPHICS,self.painter.graphics_pipeline);
         }
         let viewport=vk::Viewport{
             x:0.0,
@@ -1962,25 +2064,21 @@ impl WindowManager<'_>{
             }
         };
         unsafe{
-            self.device.cmd_set_viewport(self.graphics_queue_command_buffers[0],0,&[viewport]);
-            self.device.cmd_set_scissor(self.graphics_queue_command_buffers[0],0,&[scissor]);
+            self.device.cmd_set_viewport(self.painter.graphics_queue_command_buffers[0],0,&[viewport]);
+            self.device.cmd_set_scissor(self.painter.graphics_queue_command_buffers[0],0,&[scissor]);
         }
         //draw
         unsafe{
-            if let Some(quad_data)=&self.quad_data{
-                self.device.cmd_bind_vertex_buffers(self.graphics_queue_command_buffers[0],0,&[quad_data.buffer],&[0]);
-                self.device.cmd_draw(self.graphics_queue_command_buffers[0],4,1,0,0);
-            }else{
-                panic!("no quad data where some should be!");
-            }
+            self.device.cmd_bind_vertex_buffers(self.painter.graphics_queue_command_buffers[0],0,&[quad_data.buffer],&[0]);
+            self.device.cmd_draw(self.painter.graphics_queue_command_buffers[0],4,1,0,0);
         }
         //end render pass
         unsafe{
-            self.device.cmd_end_render_pass(self.graphics_queue_command_buffers[0])
+            self.device.cmd_end_render_pass(self.painter.graphics_queue_command_buffers[0])
         };
         //end
         unsafe{
-            self.device.end_command_buffer(self.graphics_queue_command_buffers[0])
+            self.device.end_command_buffer(self.painter.graphics_queue_command_buffers[0])
         }.unwrap();
         //submit
         let wait_semaphores_graphics=vec![
@@ -1990,10 +2088,10 @@ impl WindowManager<'_>{
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
         ];
         let command_buffers_graphics=vec![
-            self.graphics_queue_command_buffers[0]
+            self.painter.graphics_queue_command_buffers[0]
         ];
         let signal_semaphores=vec![
-            self.rendering_done
+            self.painter.rendering_done
         ];
         let submit_info_graphics=vk::SubmitInfo{
             wait_semaphore_count:wait_semaphores_graphics.len() as u32,
@@ -2006,7 +2104,7 @@ impl WindowManager<'_>{
             ..Default::default()
         };
         unsafe{
-            self.device.queue_submit(self.graphics_queue,&[submit_info_graphics],vk::Fence::null())
+            self.device.queue_submit(self.painter.graphics_queue,&[submit_info_graphics],vk::Fence::null())
         }.unwrap();
         
         //artificially wait for command buffer to finish before recording again
@@ -2047,7 +2145,7 @@ impl WindowManager<'_>{
         }.unwrap();
         //submit transition command buffer 2
         let wait_semaphores_2=vec![
-            self.rendering_done,
+            self.painter.rendering_done,
         ];
         let dst_stage_masks_2=vec![
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -2093,64 +2191,7 @@ impl WindowManager<'_>{
 
         ControlFlow::Continue
     }
-}
-impl Drop for WindowManager<'_>{
-    fn drop(&mut self){
-        //finish all gpu interaction, which may include window system interaction before window and vulkan resourse destruction
-        unsafe{
-            self.device.device_wait_idle()
-        }.unwrap();
 
-        for open_window_index in 0..self.open_windows.len(){
-            self.destroy_window(open_window_index);
-        }
-
-        unsafe{
-            self.device.destroy_pipeline(self.graphics_pipeline, self.allocation_callbacks);
-            
-            self.device.destroy_pipeline_layout(self.graphics_pipeline_layout, self.allocation_callbacks);
-
-            self.device.destroy_shader_module(self.vertex_shader_module,self.allocation_callbacks);
-            self.device.destroy_shader_module(self.fragment_shader_module,self.allocation_callbacks);
-
-            self.device.destroy_render_pass(self.render_pass, self.allocation_callbacks);
-
-            if let Some(quad_data)=&self.quad_data{
-                self.device.free_memory(quad_data.memory,self.allocation_callbacks);
-                self.device.destroy_buffer(quad_data.buffer, self.allocation_callbacks);
-            }
-
-            self.device.free_memory(self.staging_buffer.memory,self.allocation_callbacks);
-            self.device.destroy_buffer(self.staging_buffer.buffer, self.allocation_callbacks);
-
-            self.device.destroy_fence(self.frame_sync_fence, self.allocation_callbacks);
-
-            self.device.destroy_semaphore(self.rendering_done,self.allocation_callbacks);
-
-            self.device.destroy_command_pool(self.graphics_queue_command_pool, self.allocation_callbacks);
-            self.device.destroy_command_pool(self.present_queue_command_pool, self.allocation_callbacks);
-
-            self.device.destroy_device(self.allocation_callbacks);
-
-            self.instance.destroy_instance(self.allocation_callbacks)
-        };
-
-        self.handle.destroy();
-    }
-}
-
-struct Manager<'m>{
-    window_manager: WindowManager<'m>,
-}
-impl Manager<'_>{
-    pub fn new()->Self{
-        Self{
-            window_manager:WindowManager::new()
-        }
-    }
-    pub fn step(&mut self)->ControlFlow{
-        self.window_manager.step()
-    }
     pub fn run(&mut self){
         loop{
             if self.step()!=ControlFlow::Continue{
@@ -2163,9 +2204,38 @@ impl Manager<'_>{
         }
     }
 }
+impl Drop for Manager{
+    fn drop(&mut self){
+        //finish all gpu interaction, which may include window system interaction before window and vulkan resourse destruction
+        unsafe{
+            self.device.device_wait_idle()
+        }.unwrap();
+
+        unsafe{
+            std::mem::ManuallyDrop::drop(&mut self.painter);
+            std::mem::ManuallyDrop::drop(&mut self.decoder);
+        }
+
+        for open_window_index in 0..self.open_windows.len(){
+            self.destroy_window(open_window_index);
+        }
+
+        unsafe{
+            self.device.destroy_fence(self.frame_sync_fence, self.get_allocation_callbacks());
+
+            self.device.destroy_command_pool(self.present_queue_command_pool, self.get_allocation_callbacks());
+
+            self.device.destroy_device(self.get_allocation_callbacks());
+
+            self.instance.destroy_instance(self.get_allocation_callbacks())
+        };
+
+        self.window_manager_handle.destroy();
+    }
+}
 
 fn main() {
     let mut manager=Manager::new();
-    manager.window_manager.new_window(600,400,"hello milena");
+    manager.new_window(600,400,"hello milena");
     manager.run();
 }
