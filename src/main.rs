@@ -49,6 +49,7 @@ use xcb::{
     ffi::*,
 };
 
+extern crate image;
 #[macro_use]
 extern crate memoffset;
 extern crate libc;
@@ -398,6 +399,15 @@ struct IntegratedBuffer{
     memory:vk::DeviceMemory,
 }
 
+#[derive(Debug,Clone,Copy)]
+struct Image{
+    width:u32,
+    height:u32,
+    format:vk::Format,
+    memory:vk::DeviceMemory,
+    image:vk::Image,
+    image_view:vk::ImageView,
+}
 struct Decoder{
     allocation_callbacks:Option<vk::AllocationCallbacks>,
     #[allow(dead_code)]
@@ -409,6 +419,8 @@ struct Decoder{
 
     meshes:std::collections::HashMap<&'static str,IntegratedBuffer>,
 
+    textures:std::collections::HashMap<&'static str,Image>,
+
     vertex_shaders:std::collections::HashMap<&'static str,vk::ShaderModule>,
     fragment_shaders:std::collections::HashMap<&'static str,vk::ShaderModule>,
 }
@@ -416,6 +428,7 @@ impl Decoder{
     fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
         self.allocation_callbacks.as_ref()
     }
+
     pub fn get_quad(&mut self,command_buffer:vk::CommandBuffer)->IntegratedBuffer{
         if let Some(quad)=self.meshes.get("quad"){
             return *quad;
@@ -443,6 +456,7 @@ impl Decoder{
             return quad;
         }
     }
+
     pub fn upload_vertex_data(&mut self,vertex_data:&Vec<VertexData>,command_buffer:vk::CommandBuffer)->IntegratedBuffer{
         let size=(vertex_data.len() * std::mem::size_of::<VertexData>()) as u64;
         let buffer_create_info=vk::BufferCreateInfo{
@@ -593,6 +607,217 @@ impl Decoder{
         }
     }
     */
+
+    pub fn get_texture(&mut self,filename:&'static str,format:vk::Format,command_buffer:vk::CommandBuffer)->Image{
+        //return cached texture if present
+        if let Some(texture)=self.textures.get(filename){
+            return *texture;
+        }
+
+        //read file from disk and decode into b8g8r8a8 format
+        let native_image=image::open(filename).unwrap().into_bgra8();
+        let width=native_image.width();
+        let height=native_image.height();
+
+        //create image vulkan handle
+        let image={
+            let image_create_info=vk::ImageCreateInfo{
+                image_type:vk::ImageType::TYPE_2D,
+                format,
+                extent:vk::Extent3D{
+                    width,
+                    height,
+                    depth:1,
+                },
+                mip_levels:1,
+                array_layers:1,
+                samples:vk::SampleCountFlags::TYPE_1,
+                tiling:vk::ImageTiling::OPTIMAL,
+                usage:vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED, //is copied to, and then sampled from
+                sharing_mode:vk::SharingMode::EXCLUSIVE,//is only accessed from queues from the same family at the same time (ownership transfer in between)
+                initial_layout:vk::ImageLayout::UNDEFINED,//when ownership is acquired to copy data to this image, the layout is transitioned to a valid value
+                ..Default::default()
+            };
+            unsafe{
+                self.device.create_image(&image_create_info,self.get_allocation_callbacks()).unwrap()
+            }
+        };
+
+        //allocate image memory and upload data into staging buffer
+        //then schedule commands to copy image data from staging into image memory
+        let mut memory=vk::DeviceMemory::null();
+        {
+            let image_memory_reqirements=unsafe{
+                self.device.get_image_memory_requirements(image)
+            };
+            if self.staging_buffer.size<image_memory_reqirements.size{
+                panic!("staging buffer not big enough");
+            }
+
+            for i in 0..self.device_memory_properties.memory_type_count{
+                if (image_memory_reqirements.memory_type_bits & (1<<i))>0 &&
+                    self.device_memory_properties.memory_types[i as usize].property_flags
+                        .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                {
+                    let memory_allocate_info=vk::MemoryAllocateInfo{
+                        allocation_size:image_memory_reqirements.size,
+                        memory_type_index:i,
+                        ..Default::default()
+                    };
+                    //allocate image memory
+                    unsafe{
+                        memory=self.device.allocate_memory(&memory_allocate_info, self.get_allocation_callbacks()).unwrap()
+                    }
+                    
+                    //bind memory to image handle
+                    unsafe{
+                        self.device.bind_image_memory(image, memory, 0)
+                    }.unwrap();
+
+                    //map staging memory
+                    let memory_pointer=unsafe{
+                        self.device.map_memory(self.staging_buffer.memory, 0, image_memory_reqirements.size, vk::MemoryMapFlags::empty())
+                    }.unwrap();
+
+                    //copy image data to staging
+                    unsafe{
+                        libc::memcpy(memory_pointer,native_image.into_raw().as_mut_ptr() as *mut libc::c_void,image_memory_reqirements.size as usize);
+                    }
+
+                    //flush staging and unmap after
+                    let flush_range=vk::MappedMemoryRange{
+                        memory:self.staging_buffer.memory,
+                        offset:0,
+                        size:image_memory_reqirements.size,
+                        ..Default::default()
+                    };
+                    unsafe{
+                        self.device.flush_mapped_memory_ranges(&[flush_range]).unwrap();
+                        self.device.unmap_memory(self.staging_buffer.memory);
+                    }
+
+                    //schedule image data transfer from staging to final
+                    
+                    let image_subresource_range=vk::ImageSubresourceRange{
+                        aspect_mask:vk::ImageAspectFlags::COLOR,
+                        base_mip_level:0,
+                        level_count:1,
+                        base_array_layer:0,
+                        layer_count:1,
+                    };
+                    let image_memory_barrier_none_to_transfer = vk::ImageMemoryBarrier{
+                        src_access_mask:vk::AccessFlags::empty(),
+                        dst_access_mask:vk::AccessFlags::TRANSFER_WRITE,
+                        old_layout:vk::ImageLayout::UNDEFINED,
+                        new_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                        dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                        image,
+                        subresource_range:image_subresource_range,
+                        ..Default::default()
+                    };
+                    unsafe{
+                        //perform buffer layout transition from copy target to vertex data source
+                        self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_none_to_transfer]);
+                    }
+
+                    let buffer_image_copy_info=vk::BufferImageCopy{
+                        buffer_offset:0,
+                        buffer_row_length:0,
+                        buffer_image_height:0,
+                        image_subresource:vk::ImageSubresourceLayers{
+                            aspect_mask:vk::ImageAspectFlags::COLOR,
+                            mip_level:0,
+                            base_array_layer:0,
+                            layer_count:1,
+                        },
+                        image_offset:vk::Offset3D{
+                            x:0,
+                            y:0,
+                            z:0,
+                        },
+                        image_extent:vk::Extent3D{
+                            width,
+                            height,
+                            depth:1,
+                        },
+                        ..Default::default()
+                    };
+                    unsafe{
+                        self.device.cmd_copy_buffer_to_image(command_buffer, self.staging_buffer.buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy_info]);
+                    }
+                    
+                    let image_subresource_range=vk::ImageSubresourceRange{
+                        aspect_mask:vk::ImageAspectFlags::COLOR,
+                        base_mip_level:0,
+                        level_count:1,
+                        base_array_layer:0,
+                        layer_count:1,
+                    };
+                    let image_memory_barrier_transfer_to_shader_read = vk::ImageMemoryBarrier{
+                        src_access_mask:vk::AccessFlags::TRANSFER_WRITE,
+                        dst_access_mask:vk::AccessFlags::SHADER_READ,
+                        old_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        new_layout:vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                        dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                        image,
+                        subresource_range:image_subresource_range,
+                        ..Default::default()
+                    };
+                    unsafe{
+                        //perform buffer layout transition from copy target to vertex data source
+                        self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_transfer_to_shader_read]);
+                    }
+
+                    break;
+                }
+            }
+        };
+        if memory==vk::DeviceMemory::null(){
+            panic!("no fit memory found!");
+        }
+        
+        //create image view to enable image access
+        let image_view={
+            let subresource_range=vk::ImageSubresourceRange{
+                aspect_mask:vk::ImageAspectFlags::COLOR,
+                base_mip_level:0,
+                level_count:1,
+                base_array_layer:0,
+                layer_count:1,
+            };
+            let image_view_create_info=vk::ImageViewCreateInfo{
+                image,
+                view_type:vk::ImageViewType::TYPE_2D,
+                format,
+                components:vk::ComponentMapping{
+                    r:vk::ComponentSwizzle::IDENTITY,
+                    g:vk::ComponentSwizzle::IDENTITY,
+                    b:vk::ComponentSwizzle::IDENTITY,
+                    a:vk::ComponentSwizzle::IDENTITY,
+                },
+                subresource_range,
+                ..Default::default()
+            };
+            unsafe{
+                self.device.create_image_view(&image_view_create_info,self.get_allocation_callbacks()).unwrap()
+            }
+        };
+
+        let image=Image{
+            width,
+            height,
+            format,
+            memory,
+            image,
+            image_view,
+        };
+
+        self.textures.insert(filename,image);
+
+        return image;
+    }
 }
 impl Drop for Decoder{
     fn drop(&mut self){
@@ -620,6 +845,7 @@ impl Drop for Decoder{
 
     }
 }
+
 struct Painter{
     allocation_callbacks:Option<vk::AllocationCallbacks>,
     #[allow(dead_code)]
@@ -793,6 +1019,7 @@ impl Manager{
     fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
         self.allocation_callbacks.as_ref()
     }
+
     pub fn new()->Self{
         let window_manager_handle=WindowManagerHandle::new();
         let open_windows=Vec::new();
@@ -1405,6 +1632,7 @@ impl Manager{
                     memory,
                 },
                 meshes:std::collections::HashMap::new(),
+                textures:std::collections::HashMap::new(),
                 vertex_shaders,
                 fragment_shaders,
             })
@@ -2027,6 +2255,7 @@ impl Manager{
 
         //record upload, if required
         let quad_data=self.decoder.get_quad(self.painter.graphics_queue_command_buffers[0]);
+        let intel_truck=self.decoder.get_texture("inteltruck.png", vk::Format::R8G8B8A8_UNORM, self.painter.graphics_queue_command_buffers[0]);
         //render quad
         //begin render pass
         let clear_value=vk::ClearValue{
@@ -2249,6 +2478,6 @@ impl Drop for Manager{
 
 fn main() {
     let mut manager=Manager::new();
-    manager.new_window(600,400,"hello milena");
+    manager.new_window(600,400,"hello milena\0");
     manager.run();
 }
