@@ -1771,15 +1771,15 @@ impl Manager{
                         )
                     };
 
-                    self.handle.xcb_check_cookie(&create_window_cookie,"create window");
+                    self.window_manager_handle.xcb_check_cookie(&create_window_cookie,"create window");
 
                     unsafe{
                         base::xcb_flush(*connection)
                     };
 
                     //set window decorations (?)
-                    let window_type_atom=self.handle.get_intern_atom("_NET_WM_WINDOW_TYPE\0");
-                    let window_type_normal_atom=self.handle.get_intern_atom("_NET_WM_WINDOW_TYPE_NORMAL\0");
+                    let window_type_atom=self.window_manager_handle.get_intern_atom("_NET_WM_WINDOW_TYPE\0");
+                    let window_type_normal_atom=self.window_manager_handle.get_intern_atom("_NET_WM_WINDOW_TYPE_NORMAL\0");
 
                     let window_type_cookie=unsafe{
                         xcb_change_property_checked ( 
@@ -1793,7 +1793,7 @@ impl Manager{
                             &window_type_normal_atom as *const xcb_atom_t as *const libc::c_void
                         )
                     };
-                    self.handle.xcb_check_cookie(&window_type_cookie,"change property");
+                    self.window_manager_handle.xcb_check_cookie(&window_type_cookie,"change property");
 
                     //set window title
                     for prop_name in vec![
@@ -1805,7 +1805,7 @@ impl Manager{
                         "_NET_WM_VISIBLE_ICON_NAME\0"
                     ].iter(){
                         let cookie=unsafe{
-                            let atom=self.handle.get_intern_atom(prop_name);
+                            let atom=self.window_manager_handle.get_intern_atom(prop_name);
                             xcb_change_property_checked ( 
                                 *connection,
                                 XCB_PROP_MODE_REPLACE as u8,
@@ -1817,32 +1817,32 @@ impl Manager{
                                 title.as_ptr() as *const i8 as *const libc::c_void // is this is a motif hints struct
                             )
                         };
-                        self.handle.xcb_check_cookie(&window_type_cookie,"change property");
+                        self.window_manager_handle.xcb_check_cookie(&window_type_cookie,"change property");
                     }
 
-                    let close=self.handle.get_intern_atom("WM_DELETE_WINDOW\0");//_NET_CLOSE_WINDOW
-                    let hidden=self.handle.get_intern_atom("_NET_WM_STATE_HIDDEN\0");
-                    let maximized_vertical=self.handle.get_intern_atom("_NET_WM_STATE_MAXIMIZED_VERT\0");
-                    let maximized_horizontal=self.handle.get_intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ\0");
+                    let close=self.window_manager_handle.get_intern_atom("WM_DELETE_WINDOW\0");//_NET_CLOSE_WINDOW
+                    let hidden=self.window_manager_handle.get_intern_atom("_NET_WM_STATE_HIDDEN\0");
+                    let maximized_vertical=self.window_manager_handle.get_intern_atom("_NET_WM_STATE_MAXIMIZED_VERT\0");
+                    let maximized_horizontal=self.window_manager_handle.get_intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ\0");
 
                     let cookie=unsafe{
                         xcb_change_property_checked ( 
                             *connection,
                             XCB_PROP_MODE_REPLACE as u8,
                             window,
-                            self.handle.get_intern_atom("WM_PROTOCOLS\0"), //property
+                            self.window_manager_handle.get_intern_atom("WM_PROTOCOLS\0"), //property
                             xproto::XCB_ATOM_ATOM, //type
                             32,//format (8,16 or 32 bits per entry in value list)
                             1, //length of value list
                             &close as *const xcb_atom_t as *const libc::c_void // is this is a motif hints struct
                         )
                     };
-                    self.handle.xcb_check_cookie(&window_type_cookie,"change property");
+                    self.window_manager_handle.xcb_check_cookie(&window_type_cookie,"change property");
 
                     let map_window_cookie=unsafe{
                         xcb_map_window(*connection,window)
                     };
-                    self.handle.xcb_check_cookie(&map_window_cookie,"map window");
+                    self.window_manager_handle.xcb_check_cookie(&map_window_cookie,"map window");
 
                     unsafe{
                         base::xcb_flush(*connection)
@@ -1856,7 +1856,7 @@ impl Manager{
                         ..Default::default()
                     };
                     surface=unsafe{
-                        xcb_surface.create_xcb_surface(&surface_create_info,self.allocation_callbacks)
+                        xcb_surface.create_xcb_surface(&surface_create_info,self.get_allocation_callbacks())
                     }.unwrap();
 
                     WindowHandle::Xcb{
