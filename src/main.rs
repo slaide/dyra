@@ -1,5 +1,18 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 #[cfg(target_os="windows")]
 extern crate winapi;
+
+#[cfg(target_os="linux")]
+extern crate xcb;
+
+#[macro_use]
+extern crate memoffset;
+extern crate libc;
+
+extern crate image;
+extern crate ash;
 
 #[cfg(target_os="windows")]
 use winapi::{
@@ -42,18 +55,10 @@ use winapi::{
 };
 
 #[cfg(target_os="linux")]
-extern crate xcb;
-
-#[cfg(target_os="linux")]
 use xcb::{
     ffi::*,
 };
 
-extern crate image;
-#[macro_use]
-extern crate memoffset;
-extern crate libc;
-extern crate ash;
 use ash::{
     vk,
     vk::{
@@ -78,271 +83,24 @@ use ash::{
     extensions,
 };
 
-#[allow(dead_code)]
-#[derive(PartialEq,Debug,Clone,Copy)]
-enum ControlFlow{
-    Continue,
-    Stop,
-}
-#[allow(dead_code)]
-#[derive(PartialEq,Debug,Clone,Copy)]
-enum ButtonKeyState{
-    Pressed,
-    Released,
-}
-#[allow(dead_code)]
-#[derive(PartialEq,Debug,Clone,Copy)]
-enum EnterLeave{
-    Enter,
-    Leave,
-}
-#[allow(dead_code)]
-#[derive(PartialEq,Debug,Clone,Copy)]
-enum FocusChange{
-    Gained,
-    Lost,
-}
-#[allow(dead_code)]
-#[derive(PartialEq,Debug,Clone,Copy)]
-enum Event{
-    FirstEvent,
-    LastEvent,
-    ButtonEvent{
-        button:u32,
-        button_state:ButtonKeyState,
-        x:u16,
-        y:u16,
-        enter_leave:Option<EnterLeave>,
+pub mod event;
+pub use event::{Event};
 
-    },
-    KeyEvent{
-        key:u32,
-        key_state:ButtonKeyState,
-        x:u16,
-        y:u16,
-    },
-    FocusEvent{
-        focus_change:FocusChange,
-    },
-    ResizeRequestEvent,
-    WindowCloseRequested,
-    #[allow(dead_code)]
-    None,
-}
+pub mod control_flow;
+pub use control_flow::{ControlFlow};
 
-enum TestWindowHandle{
-    #[cfg(target_os="windows")]
-    Windows{
-        hwnd:HWND,
-        win32_surface:extensions::khr::Win32Surface,
-    },
-    #[cfg(target_os="linux")]
-    Xcb{
-        connection:*mut base::xcb_connection_t,
-        visual:xproto::xcb_visualid_t,
-        window:u32,
-        xcb_surface:ash::extensions::khr::XcbSurface,
-    },
-    #[allow(dead_code)]
-    NeverMatch
-}
-struct TestWindow<'a>{
-    handle:TestWindowHandle,
-    surface:extensions::khr::Surface,
-    platform_surface:vk::SurfaceKHR,
-    allocation_callbacks:Option<&'a vk::AllocationCallbacks>,
-}
-impl TestWindow<'_>{
-    fn new<'a>(window_manager_handle:&WindowManagerHandle, entry: &Entry, instance:&Instance, allocation_callbacks:Option<&'a vk::AllocationCallbacks>)->TestWindow<'a>{
-        match &window_manager_handle{
-            #[cfg(target_os="windows")]
-            WindowManagerHandle::Windows{hinstance,class_name}=>{
-                let window_hwnd:HWND=unsafe{
-                    CreateWindowExA(
-                        0,
-                        class_name.as_str().as_ptr() as LPCSTR,
-                        "my window".as_ptr() as LPCSTR,
-                        WS_OVERLAPPEDWINDOW,
-                        0,
-                        0,
-                        150,
-                        100,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        *hinstance,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if window_hwnd==std::ptr::null_mut(){
-                    panic!("CreateWindowExA")
-                }
+pub mod test_window;
+pub use test_window::{TestWindow,TestWindowHandle};
 
-                unsafe{
-                    ShowWindow(window_hwnd,SW_SHOWDEFAULT);
-                    UpdateWindow(window_hwnd);
-                }
-                
-                let win32_surface=ash::extensions::khr::Win32Surface::new(entry,instance);     
-                
-                let surface_create_info=vk::Win32SurfaceCreateInfoKHR{
-                    hinstance:*hinstance as *const libc::c_void,
-                    hwnd:window_hwnd as *const libc::c_void,
-                    ..Default::default()
-                };
-                let platform_surface=unsafe{
-                    win32_surface.create_win32_surface(&surface_create_info,allocation_callbacks)
-                }.unwrap();
+pub mod window;
+pub use window::{Window,WindowHandle};
 
-                let surface=extensions::khr::Surface::new(entry,instance);
+pub mod decoder;
+pub use decoder::{Decoder,VertexData,IntegratedBuffer};
 
-                TestWindow::<'_>{
-                    handle:TestWindowHandle::Windows{
-                        hwnd:window_hwnd,
-                        win32_surface,
-                    },
-                    surface,
-                    platform_surface,
-                    allocation_callbacks
-                }
-            },
-            #[cfg(target_os="linux")]
-            WindowManagerHandle::Xcb{connection}=>{
-                let window=unsafe{
-                    xcb_generate_id(*connection)
-                };
+pub mod painter;
+pub use painter::{Painter};
 
-                let setup=unsafe{
-                    xcb_get_setup(*connection)
-                };
-                let roots_iterator=unsafe{
-                    xproto::xcb_setup_roots_iterator(setup)
-                };
-                let screen=roots_iterator.data;
-                let visual=unsafe{
-                    (*screen).root_visual
-                };
-
-                let mask=0;
-                let values=vec![
-                ];
-
-                let create_window_cookie=unsafe{
-                    xproto::xcb_create_window_checked(
-                        *connection,
-                        base::XCB_COPY_FROM_PARENT as u8,
-                        window,
-                        (*screen).root,
-                        0,
-                        0,
-                        150,
-                        100,
-                        10,
-                        xproto::XCB_WINDOW_CLASS_INPUT_OUTPUT as u16,
-                        visual,
-                        mask,
-                        values.as_ptr()
-                    )
-                };
-
-                window_manager_handle.xcb_check_cookie(&create_window_cookie,"create window");
-
-                let map_window_cookie=unsafe{
-                    xcb_map_window(*connection,window)
-                };
-                window_manager_handle.xcb_check_cookie(&map_window_cookie,"map window");
-
-                unsafe{
-                    base::xcb_flush(*connection)
-                };
-
-                let xcb_surface=ash::extensions::khr::XcbSurface::new(entry,instance);
-
-                let surface_create_info=vk::XcbSurfaceCreateInfoKHR{
-                    connection:*connection as *mut libc::c_void,
-                    window:window,
-                    ..Default::default()
-                };
-                let platform_surface=unsafe{
-                    xcb_surface.create_xcb_surface(&surface_create_info,allocation_callbacks)
-                }.unwrap();
-
-                let surface=extensions::khr::Surface::new(entry,instance);
-
-                TestWindow{
-                    handle:TestWindowHandle::Xcb{
-                        connection:*connection,
-                        visual,
-                        window,
-                        xcb_surface,
-                    },
-                    surface,
-                    platform_surface,
-                    allocation_callbacks
-                }
-            },
-            _=>unimplemented!()
-        }
-    }
-}
-impl Drop for TestWindow<'_>{
-    fn drop(&mut self){
-        unsafe{
-            self.surface.destroy_surface(self.platform_surface,self.allocation_callbacks)
-        }
-        match self.handle{
-            #[cfg(target_os="windows")]
-            TestWindowHandle::Windows{hwnd,..}=>{
-                unsafe{
-                    DestroyWindow(hwnd);
-                }
-            },
-            #[cfg(target_os="linux")]
-            TestWindowHandle::Xcb{connection,window,..}=>{
-                unsafe{
-                    xcb_destroy_window(connection,window)
-                };
-            },
-            _=>unreachable!()
-        }
-
-    }
-}
-
-enum WindowHandle{
-    #[cfg(target_os="windows")]
-    Windows{
-        hwnd:HWND,
-        #[allow(dead_code)]
-        win32_surface:extensions::khr::Win32Surface,
-    },
-    #[cfg(target_os="linux")]
-    Xcb{
-        connection:*mut base::xcb_connection_t,
-        visual:xproto::xcb_visualid_t,
-        window:u32,
-        #[allow(dead_code)]
-        xcb_surface:ash::extensions::khr::XcbSurface,
-        close:xcb_atom_t,
-        maximized_horizontal:xcb_atom_t,
-        maximized_vertical:xcb_atom_t,
-        hidden:xcb_atom_t,
-    },
-    #[allow(dead_code)]
-    NeverMatch
-}
-struct Window{
-    extent:vk::Extent2D,
-    handle:WindowHandle,
-    surface:vk::SurfaceKHR,
-    image_available:vk::Semaphore,
-    image_transferable:vk::Semaphore,
-    image_presentable:vk::Semaphore,
-    swapchain:extensions::khr::Swapchain,
-    swapchain_handle:vk::SwapchainKHR,
-    swapchain_images:Vec<vk::Image>,
-    swapchain_image_views:Vec<vk::ImageView>,
-    swapchain_image_framebuffers:Vec<vk::Framebuffer>,
-}
 
 #[cfg(target_os="windows")]
 static mut WINDOWS_WINDOW_EVENTS:Vec<Event>=Vec::new();
@@ -357,532 +115,7 @@ unsafe extern "system" fn windowproc(window:HWND,umsg:u32,wparam:WPARAM,lparam:L
     }
 }
 
-#[allow(dead_code)]
-struct VertexData{
-    x:f32,
-    y:f32,
-    z:f32,
-    w:f32,
-    r:f32,
-    g:f32,
-    b:f32,
-    a:f32,
-}
-impl VertexData{
-    pub fn new(
-        x:f32,
-        y:f32,
-        z:f32,
-        w:f32,
-        r:f32,
-        g:f32,
-        b:f32,
-        a:f32,
-    )->Self{
-        Self{
-            x,
-            y,
-            z,
-            w,
-            r,
-            g,
-            b,
-            a,
-        }
-    }
-}
-
-#[derive(Debug,Clone,Copy)]
-struct IntegratedBuffer{
-    size:u64,
-    buffer:vk::Buffer,
-    memory:vk::DeviceMemory,
-}
-
-#[derive(Debug,Clone,Copy)]
-struct Image{
-    width:u32,
-    height:u32,
-    format:vk::Format,
-    memory:vk::DeviceMemory,
-    image:vk::Image,
-    image_view:vk::ImageView,
-}
-struct Decoder{
-    allocation_callbacks:Option<vk::AllocationCallbacks>,
-    #[allow(dead_code)]
-    instance:Instance,
-    device:Device,
-    device_memory_properties:vk::PhysicalDeviceMemoryProperties,
-
-    staging_buffer:IntegratedBuffer,
-
-    meshes:std::collections::HashMap<&'static str,IntegratedBuffer>,
-
-    textures:std::collections::HashMap<&'static str,Image>,
-
-    vertex_shaders:std::collections::HashMap<&'static str,vk::ShaderModule>,
-    fragment_shaders:std::collections::HashMap<&'static str,vk::ShaderModule>,
-}
-impl Decoder{
-    fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
-        self.allocation_callbacks.as_ref()
-    }
-
-    pub fn get_quad(&mut self,command_buffer:vk::CommandBuffer)->IntegratedBuffer{
-        if let Some(quad)=self.meshes.get("quad"){
-            return *quad;
-        }else{
-            let quad_data=vec![
-                VertexData::new(
-                  -0.7, -0.7, 0.0, 1.0,
-                  1.0, 0.0, 0.0, 0.0
-                ),
-                VertexData::new(
-                  -0.7, 0.7, 0.0, 1.0,
-                  0.0, 1.0, 0.0, 0.0
-                ),
-                VertexData::new(
-                  0.7, -0.7, 0.0, 1.0,
-                  0.0, 0.0, 1.0, 0.0
-                ),
-                VertexData::new(
-                  0.7, 0.7, 0.0, 1.0,
-                  0.3, 0.3, 0.3, 0.0
-                )
-            ];
-            let quad=self.upload_vertex_data(&quad_data,command_buffer);
-            self.meshes.insert("quad",quad);
-            return quad;
-        }
-    }
-
-    pub fn upload_vertex_data(&mut self,vertex_data:&Vec<VertexData>,command_buffer:vk::CommandBuffer)->IntegratedBuffer{
-        let size=(vertex_data.len() * std::mem::size_of::<VertexData>()) as u64;
-        let buffer_create_info=vk::BufferCreateInfo{
-            size,
-            usage:vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            sharing_mode:vk::SharingMode::EXCLUSIVE,
-            ..Default::default()
-        };
-        let buffer=unsafe{
-            self.device.create_buffer(&buffer_create_info,self.get_allocation_callbacks())
-        }.unwrap();
-
-        let mut memory=vk::DeviceMemory::null();
-
-        let buffer_memory_requirements=unsafe{
-            self.device.get_buffer_memory_requirements(buffer)
-        };
-
-        for memory_type_index in 0..self.device_memory_properties.memory_type_count{
-            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
-            && self.device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::DEVICE_LOCAL){
-                //allocate
-                let memory_allocate_info=vk::MemoryAllocateInfo{
-                    allocation_size:buffer_memory_requirements.size,
-                    memory_type_index,
-                    ..Default::default()
-                };
-                memory=unsafe{
-                    self.device.allocate_memory(&memory_allocate_info,self.get_allocation_callbacks())
-                }.unwrap();
-
-                //bind
-                let memory_offset=0;
-                unsafe{
-                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
-                }.unwrap();
-
-                //map staging (!)
-                let memory_pointer=unsafe{
-                    self.device.map_memory(self.staging_buffer.memory,0,size,vk::MemoryMapFlags::empty())
-                }.unwrap();
-
-                //memcpy
-                unsafe{
-                    libc::memcpy(memory_pointer,vertex_data.as_ptr() as *const libc::c_void,size as usize);
-                }
-
-                //flush
-                let flush_range=vk::MappedMemoryRange{
-                    memory:self.staging_buffer.memory,
-                    offset:0,
-                    size,
-                    ..Default::default()
-                };
-                unsafe{
-                    self.device.flush_mapped_memory_ranges(&[flush_range])
-                }.unwrap();
-
-                //unmap
-                unsafe{
-                    self.device.unmap_memory(self.staging_buffer.memory);
-                }
-
-                let buffer_memory_barrier = vk::BufferMemoryBarrier{
-                    src_access_mask:vk::AccessFlags::MEMORY_WRITE,
-                    dst_access_mask:vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
-                    src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                    buffer,
-                    offset: 0,
-                    size,
-                    ..Default::default()
-                  };
-
-                unsafe{
-                    self.device.cmd_copy_buffer(command_buffer,self.staging_buffer.buffer,buffer,&[
-                        vk::BufferCopy{
-                            src_offset:0,
-                            dst_offset:0,
-                            size,
-                        }
-                    ]);
-
-                    //perform buffer layout transition from copy target to vertex data source
-                    self.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &[buffer_memory_barrier], &[]);
-                };
-
-                break;
-            }
-        }
-        if memory==vk::DeviceMemory::null(){
-            panic!("staging buffer has no memory")
-        }
-
-        IntegratedBuffer{
-            size,
-            buffer,
-            memory,
-        }
-    }
-    /*
-    pub fn new_staging(&mut self,size:u64)->IntegratedBuffer{
-        let buffer_create_info=vk::BufferCreateInfo{
-            size:size,
-            usage:vk::BufferUsageFlags::TRANSFER_SRC,
-            sharing_mode:vk::SharingMode::EXCLUSIVE,
-            ..Default::default()
-        };
-        let buffer=unsafe{
-            self.device.create_buffer(&buffer_create_info,self.allocation_callbacks)
-        }.unwrap();
-
-        let mut memory=vk::DeviceMemory::null();
-
-        let buffer_memory_requirements=unsafe{
-            self.device.get_buffer_memory_requirements(buffer)
-        };
-
-        for memory_type_index in 0..self.device_memory_properties.memory_type_count{
-            if (buffer_memory_requirements.memory_type_bits & (1<<memory_type_index))>0 
-            && self.device_memory_properties.memory_types[memory_type_index as usize].property_flags.intersects(vk::MemoryPropertyFlags::HOST_VISIBLE){
-                //allocate
-                let memory_allocate_info=vk::MemoryAllocateInfo{
-                    allocation_size:buffer_memory_requirements.size,
-                    memory_type_index,
-                    ..Default::default()
-                };
-                memory=unsafe{
-                    self.device.allocate_memory(&memory_allocate_info,self.allocation_callbacks)
-                }.unwrap();
-                //bind
-                let memory_offset=0;
-                unsafe{
-                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
-                }.unwrap();
-
-                break;
-            }
-        }
-        if memory==vk::DeviceMemory::null(){
-            panic!("staging buffer has no memory")
-        }
-
-        IntegratedBuffer{
-            size,
-            buffer,
-            memory,
-        }
-    }
-    */
-
-    pub fn get_texture(&mut self,filename:&'static str,format:vk::Format,command_buffer:vk::CommandBuffer)->Image{
-        //return cached texture if present
-        if let Some(texture)=self.textures.get(filename){
-            return *texture;
-        }
-
-        //read file from disk and decode into b8g8r8a8 format
-        let native_image=image::open(filename).unwrap().into_bgra8();
-        let width=native_image.width();
-        let height=native_image.height();
-
-        //create image vulkan handle
-        let image={
-            let image_create_info=vk::ImageCreateInfo{
-                image_type:vk::ImageType::TYPE_2D,
-                format,
-                extent:vk::Extent3D{
-                    width,
-                    height,
-                    depth:1,
-                },
-                mip_levels:1,
-                array_layers:1,
-                samples:vk::SampleCountFlags::TYPE_1,
-                tiling:vk::ImageTiling::OPTIMAL,
-                usage:vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED, //is copied to, and then sampled from
-                sharing_mode:vk::SharingMode::EXCLUSIVE,//is only accessed from queues from the same family at the same time (ownership transfer in between)
-                initial_layout:vk::ImageLayout::UNDEFINED,//when ownership is acquired to copy data to this image, the layout is transitioned to a valid value
-                ..Default::default()
-            };
-            unsafe{
-                self.device.create_image(&image_create_info,self.get_allocation_callbacks()).unwrap()
-            }
-        };
-
-        //allocate image memory and upload data into staging buffer
-        //then schedule commands to copy image data from staging into image memory
-        let mut memory=vk::DeviceMemory::null();
-        {
-            let image_memory_reqirements=unsafe{
-                self.device.get_image_memory_requirements(image)
-            };
-            if self.staging_buffer.size<image_memory_reqirements.size{
-                panic!("staging buffer not big enough");
-            }
-
-            for i in 0..self.device_memory_properties.memory_type_count{
-                if (image_memory_reqirements.memory_type_bits & (1<<i))>0 &&
-                    self.device_memory_properties.memory_types[i as usize].property_flags
-                        .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
-                {
-                    let memory_allocate_info=vk::MemoryAllocateInfo{
-                        allocation_size:image_memory_reqirements.size,
-                        memory_type_index:i,
-                        ..Default::default()
-                    };
-                    //allocate image memory
-                    unsafe{
-                        memory=self.device.allocate_memory(&memory_allocate_info, self.get_allocation_callbacks()).unwrap()
-                    }
-                    
-                    //bind memory to image handle
-                    unsafe{
-                        self.device.bind_image_memory(image, memory, 0)
-                    }.unwrap();
-
-                    //map staging memory
-                    let memory_pointer=unsafe{
-                        self.device.map_memory(self.staging_buffer.memory, 0, image_memory_reqirements.size, vk::MemoryMapFlags::empty())
-                    }.unwrap();
-
-                    //copy image data to staging
-                    unsafe{
-                        libc::memcpy(memory_pointer,native_image.into_raw().as_mut_ptr() as *mut libc::c_void,image_memory_reqirements.size as usize);
-                    }
-
-                    //flush staging and unmap after
-                    let flush_range=vk::MappedMemoryRange{
-                        memory:self.staging_buffer.memory,
-                        offset:0,
-                        size:image_memory_reqirements.size,
-                        ..Default::default()
-                    };
-                    unsafe{
-                        self.device.flush_mapped_memory_ranges(&[flush_range]).unwrap();
-                        self.device.unmap_memory(self.staging_buffer.memory);
-                    }
-
-                    //schedule image data transfer from staging to final
-                    
-                    let image_subresource_range=vk::ImageSubresourceRange{
-                        aspect_mask:vk::ImageAspectFlags::COLOR,
-                        base_mip_level:0,
-                        level_count:1,
-                        base_array_layer:0,
-                        layer_count:1,
-                    };
-                    let image_memory_barrier_none_to_transfer = vk::ImageMemoryBarrier{
-                        src_access_mask:vk::AccessFlags::empty(),
-                        dst_access_mask:vk::AccessFlags::TRANSFER_WRITE,
-                        old_layout:vk::ImageLayout::UNDEFINED,
-                        new_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                        dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                        image,
-                        subresource_range:image_subresource_range,
-                        ..Default::default()
-                    };
-                    unsafe{
-                        //perform buffer layout transition from copy target to vertex data source
-                        self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_none_to_transfer]);
-                    }
-
-                    let buffer_image_copy_info=vk::BufferImageCopy{
-                        buffer_offset:0,
-                        buffer_row_length:0,
-                        buffer_image_height:0,
-                        image_subresource:vk::ImageSubresourceLayers{
-                            aspect_mask:vk::ImageAspectFlags::COLOR,
-                            mip_level:0,
-                            base_array_layer:0,
-                            layer_count:1,
-                        },
-                        image_offset:vk::Offset3D{
-                            x:0,
-                            y:0,
-                            z:0,
-                        },
-                        image_extent:vk::Extent3D{
-                            width,
-                            height,
-                            depth:1,
-                        },
-                        ..Default::default()
-                    };
-                    unsafe{
-                        self.device.cmd_copy_buffer_to_image(command_buffer, self.staging_buffer.buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy_info]);
-                    }
-                    
-                    let image_subresource_range=vk::ImageSubresourceRange{
-                        aspect_mask:vk::ImageAspectFlags::COLOR,
-                        base_mip_level:0,
-                        level_count:1,
-                        base_array_layer:0,
-                        layer_count:1,
-                    };
-                    let image_memory_barrier_transfer_to_shader_read = vk::ImageMemoryBarrier{
-                        src_access_mask:vk::AccessFlags::TRANSFER_WRITE,
-                        dst_access_mask:vk::AccessFlags::SHADER_READ,
-                        old_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        new_layout:vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                        dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                        image,
-                        subresource_range:image_subresource_range,
-                        ..Default::default()
-                    };
-                    unsafe{
-                        //perform buffer layout transition from copy target to vertex data source
-                        self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_transfer_to_shader_read]);
-                    }
-
-                    break;
-                }
-            }
-        };
-        if memory==vk::DeviceMemory::null(){
-            panic!("no fit memory found!");
-        }
-        
-        //create image view to enable image access
-        let image_view={
-            let subresource_range=vk::ImageSubresourceRange{
-                aspect_mask:vk::ImageAspectFlags::COLOR,
-                base_mip_level:0,
-                level_count:1,
-                base_array_layer:0,
-                layer_count:1,
-            };
-            let image_view_create_info=vk::ImageViewCreateInfo{
-                image,
-                view_type:vk::ImageViewType::TYPE_2D,
-                format,
-                components:vk::ComponentMapping{
-                    r:vk::ComponentSwizzle::IDENTITY,
-                    g:vk::ComponentSwizzle::IDENTITY,
-                    b:vk::ComponentSwizzle::IDENTITY,
-                    a:vk::ComponentSwizzle::IDENTITY,
-                },
-                subresource_range,
-                ..Default::default()
-            };
-            unsafe{
-                self.device.create_image_view(&image_view_create_info,self.get_allocation_callbacks()).unwrap()
-            }
-        };
-
-        let image=Image{
-            width,
-            height,
-            format,
-            memory,
-            image,
-            image_view,
-        };
-
-        self.textures.insert(filename,image);
-
-        return image;
-    }
-}
-impl Drop for Decoder{
-    fn drop(&mut self){
-        for (_name,shader) in self.vertex_shaders.iter(){
-            unsafe{
-                self.device.destroy_shader_module(*shader,self.get_allocation_callbacks());
-            }
-        }
-        for (_name,shader) in self.fragment_shaders.iter(){
-            unsafe{
-                self.device.destroy_shader_module(*shader,self.get_allocation_callbacks());
-            }
-        }
-        for (_name,mesh) in self.meshes.iter(){
-            unsafe{
-                self.device.free_memory(mesh.memory,self.get_allocation_callbacks());
-                self.device.destroy_buffer(mesh.buffer, self.get_allocation_callbacks());
-            }
-        }
-
-        unsafe{
-            self.device.free_memory(self.staging_buffer.memory,self.get_allocation_callbacks());
-            self.device.destroy_buffer(self.staging_buffer.buffer, self.get_allocation_callbacks());
-        }
-
-    }
-}
-
-struct Painter{
-    allocation_callbacks:Option<vk::AllocationCallbacks>,
-    #[allow(dead_code)]
-    instance:Instance,
-    device:Device,
-    swapchain_surface_format:vk::SurfaceFormatKHR,
-    render_pass:vk::RenderPass,
-    graphics_pipeline_layout:vk::PipelineLayout,
-    graphics_pipeline:vk::Pipeline,
-    rendering_done:vk::Semaphore,
-    graphics_queue:vk::Queue,
-    graphics_queue_family_index:u32,
-    graphics_queue_command_pool:vk::CommandPool,
-    graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
-}
-impl Drop for Painter{
-    fn drop(&mut self){
-        unsafe{
-            self.device.destroy_pipeline(self.graphics_pipeline, self.get_allocation_callbacks());
-            
-            self.device.destroy_pipeline_layout(self.graphics_pipeline_layout, self.get_allocation_callbacks());
-
-            self.device.destroy_render_pass(self.render_pass, self.get_allocation_callbacks());
-
-            self.device.destroy_semaphore(self.rendering_done,self.get_allocation_callbacks());
-
-            self.device.destroy_command_pool(self.graphics_queue_command_pool, self.get_allocation_callbacks());
-        }
-    }
-}
-impl Painter{
-    fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
-        self.allocation_callbacks.as_ref()
-    }
-}
-
-enum WindowManagerHandle{
+pub enum WindowManagerHandle{
     #[cfg(target_os="windows")]
     Windows{
         hinstance:HINSTANCE,
@@ -1323,7 +556,7 @@ impl Manager{
             device.create_fence(&fence_create_info,temp_allocation_callbacks)
         }.unwrap();
 
-        //create staging buffer for resource upload
+        //create staging buffer for resource upload with 1MB size (should be enough for this exercise)
         let buffer_size=1*1024*1024;
         let buffer_create_info=vk::BufferCreateInfo{
             size:buffer_size,
@@ -1391,6 +624,74 @@ impl Manager{
             }
         }
 
+        let sampler_create_info=vk::SamplerCreateInfo{
+            mag_filter:vk::Filter::LINEAR,
+            min_filter:vk::Filter::LINEAR,
+            mipmap_mode:vk::SamplerMipmapMode::NEAREST,
+            address_mode_u:vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            address_mode_v:vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            address_mode_w:vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            mip_lod_bias:0.0,
+            anisotropy_enable:false as u32,
+            compare_enable:false as u32,
+            min_lod:0.0,
+            max_lod:0.0,
+            border_color:vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+            unnormalized_coordinates:false as u32,
+            ..Default::default()
+        };
+        let sampler=unsafe{
+            device.create_sampler(&sampler_create_info,temp_allocation_callbacks)
+        }.unwrap();
+
+        let descriptor_set_layout_bindings=vec![
+            vk::DescriptorSetLayoutBinding{
+                binding:0,
+                descriptor_type:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,//combine image and sampler into a single descriptor
+                descriptor_count:1,
+                stage_flags:vk::ShaderStageFlags::FRAGMENT,
+                p_immutable_samplers:std::ptr::null(),
+            }
+        ];
+        let descriptor_set_layout_create_info=vk::DescriptorSetLayoutCreateInfo{
+            binding_count:descriptor_set_layout_bindings.len() as u32,
+            p_bindings:descriptor_set_layout_bindings.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_set_layout:vk::DescriptorSetLayout=unsafe{
+            device.create_descriptor_set_layout(&descriptor_set_layout_create_info,temp_allocation_callbacks)
+        }.unwrap();
+
+        let descriptor_pool_sizes=vec![
+            vk::DescriptorPoolSize{
+                ty:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count:1,
+            }
+        ];
+        let descriptor_pool_create_info=vk::DescriptorPoolCreateInfo{
+            max_sets:1,
+            pool_size_count:descriptor_pool_sizes.len() as u32,
+            p_pool_sizes:descriptor_pool_sizes.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_pool=unsafe{
+            device.create_descriptor_pool(&descriptor_pool_create_info,temp_allocation_callbacks)
+        }.unwrap();
+
+        let descriptor_set_layouts=vec![
+            descriptor_set_layout
+        ];
+        let descriptor_set_allocate_info=vk::DescriptorSetAllocateInfo{
+            descriptor_pool,
+            descriptor_set_count:descriptor_set_layouts.len() as u32,
+            p_set_layouts:descriptor_set_layouts.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_set=unsafe{
+            device.allocate_descriptor_sets(&descriptor_set_allocate_info)
+        }.unwrap()[0];
+        
+
         let render_pass_attachment_descriptions=vec![
             vk::AttachmentDescription{
                 format:swapchain_surface_format.format,
@@ -1434,6 +735,8 @@ impl Manager{
 
         let graphics_pipeline_layout_create_info=vk::PipelineLayoutCreateInfo{
             //descriptor set layouts
+            set_layout_count:descriptor_set_layouts.len() as u32,
+            p_set_layouts:descriptor_set_layouts.as_ptr(),
             //push constant ranges
             ..Default::default()
         };
@@ -1460,6 +763,11 @@ impl Manager{
         let fragment_shader_module=unsafe{
             device.create_shader_module(&fragment_shader_create_info,temp_allocation_callbacks)
         }.unwrap();
+
+        let mut vertex_shaders=std::collections::HashMap::new();
+        vertex_shaders.insert("quad.vert.spv",vertex_shader_module);
+        let mut fragment_shaders=std::collections::HashMap::new();
+        fragment_shaders.insert("quad.frag.spv",fragment_shader_module);
 
         let shader_entry_fn_name="main\0".as_ptr() as *const i8;
         let shader_stage_create_infos=vec![
@@ -1493,8 +801,8 @@ impl Manager{
             vk::VertexInputAttributeDescription{
                 location:1,
                 binding:vertex_binding_descriptions[0].binding,
-                format:vk::Format::R32G32B32A32_SFLOAT,
-                offset:offset_of!(VertexData,r) as u32,
+                format:vk::Format::R32G32_SFLOAT,
+                offset:offset_of!(VertexData,u) as u32,
             },
         ];
         let vertex_input_state_create_info=vk::PipelineVertexInputStateCreateInfo{
@@ -1583,11 +891,6 @@ impl Manager{
         }.unwrap();
         let graphics_pipeline=graphics_pipelines[0];
 
-        let mut vertex_shaders=std::collections::HashMap::new();
-        vertex_shaders.insert("quad.vert.spv",vertex_shader_module);
-        let mut fragment_shaders=std::collections::HashMap::new();
-        fragment_shaders.insert("quad.frag.spv",fragment_shader_module);
-
         //TODO
 
         Self{
@@ -1611,6 +914,10 @@ impl Manager{
                 instance:instance.clone(),
                 device:device.clone(),
                 swapchain_surface_format,
+                sampler,
+                descriptor_pool,
+                descriptor_set_layout,
+                descriptor_set,
                 render_pass,
                 graphics_pipeline_layout,
                 graphics_pipeline,
@@ -2253,9 +1560,52 @@ impl Manager{
             self.device.begin_command_buffer(self.painter.graphics_queue_command_buffers[0], &graphics_queue_command_buffer_begin_info)
         }.unwrap();
 
-        //record upload, if required
-        let quad_data=self.decoder.get_quad(self.painter.graphics_queue_command_buffers[0]);
-        let intel_truck=self.decoder.get_texture("inteltruck.png", vk::Format::R8G8B8A8_UNORM, self.painter.graphics_queue_command_buffers[0]);
+        //barrier from top to transfer
+        unsafe{
+            self.device.cmd_pipeline_barrier(self.painter.graphics_queue_command_buffers[0],vk::PipelineStageFlags::TOP_OF_PIPE,vk::PipelineStageFlags::TRANSFER,vk::DependencyFlags::empty(),&[],&[],&[])
+        };
+
+        //record mesh upload
+        let (quad_data,quad_barrier)=self.decoder.get_quad(self.painter.graphics_queue_command_buffers[0]);
+        let mut buffer_memory_barriers=vec![];
+        if let Some(barrier)=quad_barrier{
+            buffer_memory_barriers.push(barrier);
+        }
+        unsafe{
+            self.device.cmd_pipeline_barrier( self.painter.graphics_queue_command_buffers[0], vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &buffer_memory_barriers[..], &[]);
+        }
+
+        //record texture upload (use staging buffer range outside of potential mesh upload range)
+        let (intel_truck,truck_barrier)=self.decoder.get_texture("inteltruck.png", vk::Format::R8G8B8A8_UNORM, self.painter.graphics_queue_command_buffers[0]);
+        let mut image_memory_barriers=Vec::new();
+        if let Some(barrier)=truck_barrier{
+            image_memory_barriers.push(barrier);
+        }
+        unsafe{
+            self.device.cmd_pipeline_barrier( self.painter.graphics_queue_command_buffers[0], vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &image_memory_barriers[..]);
+        }
+
+        let descriptor_image_info=vk::DescriptorImageInfo{
+            sampler:self.painter.sampler,
+            image_view:intel_truck.image_view,
+            image_layout:vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        };
+        let write_descriptor_set=vk::WriteDescriptorSet{
+            dst_set:self.painter.descriptor_set,
+            dst_binding:0,
+            dst_array_element:0,
+            descriptor_count:1,
+            descriptor_type:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            p_image_info:&descriptor_image_info,
+            ..Default::default()
+        };
+        unsafe{
+            self.device.update_descriptor_sets(&[write_descriptor_set],&[])
+        };
+        unsafe{
+            self.device.device_wait_idle()
+        }.unwrap();
+
         //render quad
         //begin render pass
         let clear_value=vk::ClearValue{
@@ -2308,6 +1658,10 @@ impl Manager{
         unsafe{
             self.device.cmd_set_viewport(self.painter.graphics_queue_command_buffers[0],0,&[viewport]);
             self.device.cmd_set_scissor(self.painter.graphics_queue_command_buffers[0],0,&[scissor]);
+        }
+        //bind descriptor set for fragment shader
+        unsafe{
+            self.device.cmd_bind_descriptor_sets(self.painter.graphics_queue_command_buffers[0], vk::PipelineBindPoint::GRAPHICS, self.painter.graphics_pipeline_layout, 0, &[self.painter.descriptor_set], &[]);
         }
         //draw
         unsafe{
