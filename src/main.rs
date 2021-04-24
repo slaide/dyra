@@ -83,6 +83,7 @@ use ash::{
     extensions,
 };
 
+
 pub mod event;
 pub use event::{Event};
 
@@ -96,7 +97,7 @@ pub mod window;
 pub use window::{Window,WindowHandle};
 
 pub mod decoder;
-pub use decoder::{Decoder,VertexData,IntegratedBuffer};
+pub use decoder::{Decoder,Vertex,IntegratedBuffer};
 
 pub mod painter;
 pub use painter::{Painter};
@@ -787,7 +788,7 @@ impl Manager{
         let vertex_binding_descriptions=vec![
             vk::VertexInputBindingDescription{
                 binding: 0,
-                stride: std::mem::size_of::<VertexData>() as u32,
+                stride: std::mem::size_of::<Vertex>() as u32,
                 input_rate:vk::VertexInputRate::VERTEX,
             },
         ];
@@ -796,13 +797,13 @@ impl Manager{
                 location:0,
                 binding:vertex_binding_descriptions[0].binding,
                 format:vk::Format::R32G32B32A32_SFLOAT,
-                offset:offset_of!(VertexData,x) as u32,
+                offset:offset_of!(Vertex,x) as u32,
             },
             vk::VertexInputAttributeDescription{
                 location:1,
                 binding:vertex_binding_descriptions[0].binding,
                 format:vk::Format::R32G32_SFLOAT,
-                offset:offset_of!(VertexData,u) as u32,
+                offset:offset_of!(Vertex,u) as u32,
             },
         ];
         let vertex_input_state_create_info=vk::PipelineVertexInputStateCreateInfo{
@@ -813,7 +814,8 @@ impl Manager{
             ..Default::default()
         };
         let input_assembly_state_create_info=vk::PipelineInputAssemblyStateCreateInfo{
-            topology:vk::PrimitiveTopology::TRIANGLE_STRIP,
+            //topology:vk::PrimitiveTopology::TRIANGLE_LIST,
+            topology:vk::PrimitiveTopology::TRIANGLE_LIST,
             primitive_restart_enable:false as u32,
             ..Default::default()
         };
@@ -934,10 +936,12 @@ impl Manager{
                 device:device.clone(),
                 device_memory_properties,
                 staging_buffer:IntegratedBuffer{
-                    size:buffer_size,
+                    buffer_size,
+                    item_count:buffer_size,//story abitrary bytes
                     buffer,
                     memory,
                 },
+                staging_buffer_in_use_size:0,
                 meshes:std::collections::HashMap::new(),
                 textures:std::collections::HashMap::new(),
                 vertex_shaders,
@@ -1566,24 +1570,10 @@ impl Manager{
         };
 
         //record mesh upload
-        let (quad_data,quad_barrier)=self.decoder.get_quad(self.painter.graphics_queue_command_buffers[0]);
-        let mut buffer_memory_barriers=vec![];
-        if let Some(barrier)=quad_barrier{
-            buffer_memory_barriers.push(barrier);
-        }
-        unsafe{
-            self.device.cmd_pipeline_barrier( self.painter.graphics_queue_command_buffers[0], vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &buffer_memory_barriers[..], &[]);
-        }
+        let quad_data=self.decoder.get_quad(self.painter.graphics_queue_command_buffers[0]);
 
         //record texture upload (use staging buffer range outside of potential mesh upload range)
-        let (intel_truck,truck_barrier)=self.decoder.get_texture("inteltruck.png", vk::Format::R8G8B8A8_UNORM, self.painter.graphics_queue_command_buffers[0]);
-        let mut image_memory_barriers=Vec::new();
-        if let Some(barrier)=truck_barrier{
-            image_memory_barriers.push(barrier);
-        }
-        unsafe{
-            self.device.cmd_pipeline_barrier( self.painter.graphics_queue_command_buffers[0], vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &image_memory_barriers[..]);
-        }
+        let intel_truck=self.decoder.get_texture("inteltruck.png", vk::Format::R8G8B8A8_UNORM, self.painter.graphics_queue_command_buffers[0]);
 
         let descriptor_image_info=vk::DescriptorImageInfo{
             sampler:self.painter.sampler,
@@ -1665,8 +1655,9 @@ impl Manager{
         }
         //draw
         unsafe{
-            self.device.cmd_bind_vertex_buffers(self.painter.graphics_queue_command_buffers[0],0,&[quad_data.buffer],&[0]);
-            self.device.cmd_draw(self.painter.graphics_queue_command_buffers[0],4,1,0,0);
+            self.device.cmd_bind_vertex_buffers(self.painter.graphics_queue_command_buffers[0],0,&[quad_data.vertices.buffer],&[0]);
+            self.device.cmd_bind_index_buffer(self.painter.graphics_queue_command_buffers[0],quad_data.vertex_indices.buffer,0,vk::IndexType::UINT16);
+            self.device.cmd_draw_indexed(self.painter.graphics_queue_command_buffers[0],quad_data.vertex_indices.item_count as u32,1,0,0,0);
         }
         //end render pass
         unsafe{
@@ -1702,6 +1693,7 @@ impl Manager{
         unsafe{
             self.device.queue_submit(self.painter.graphics_queue,&[submit_info_graphics],vk::Fence::null())
         }.unwrap();
+        self.decoder.staging_buffer_in_use_size=0;
         
         //artificially wait for command buffer to finish before recording again
         unsafe{
