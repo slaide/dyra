@@ -67,7 +67,40 @@ use ash::{
     extensions,
 };
 
-use crate::{Object,GraphicsPipeline};
+use crate::{Object};
+
+pub struct GraphicsPipeline{
+    layout:vk::PipelineLayout,
+    pipeline:vk::Pipeline,
+
+    vertex:vk::ShaderModule,
+    fragment:vk::ShaderModule,
+    
+    pub descriptor_pool:vk::DescriptorPool,
+    pub descriptor_set_layout:vk::DescriptorSetLayout,
+}
+//data for a specific shader
+pub struct ShaderData{
+    pub descriptor_set:vk::DescriptorSet,
+    
+    pub sampler:vk::Sampler,
+}
+pub struct RenderPass{
+    pub render_pass:vk::RenderPass,
+
+    //color information
+    pub color_image:vk::Image,
+    pub color_image_view:vk::ImageView,
+    //depth information
+    pub depth_image:vk::Image,
+    pub depth_image_view:vk::ImageView,
+
+    //shader stuff
+    pub pipelines:std::collections::HashMap<String,GraphicsPipeline>,
+
+    //rendering from this pass done
+    pub rendering_done:vk::Semaphore,
+}
 
 pub struct Painter{
     pub allocation_callbacks:Option<vk::AllocationCallbacks>,
@@ -76,24 +109,15 @@ pub struct Painter{
 
     pub swapchain_surface_format:vk::SurfaceFormatKHR,
 
-    pub sampler:vk::Sampler,
-
-    pub descriptor_set_layout:vk::DescriptorSetLayout,//list of descriptor types ("descriptorSetLayoutBindings"), the shader stages they are used in and their type
-    pub descriptor_set:vk::DescriptorSet,//contains handles to descriptors of types specified in layout
-    pub descriptor_pool:vk::DescriptorPool,//allocate descriptors
-
-    pub render_pass:vk::RenderPass,
-
-    pub graphics_pipeline_2d:GraphicsPipeline,
-    pub graphics_pipeline_3d:GraphicsPipeline,
-
-    pub rendering_done:vk::Semaphore,
-
     pub graphics_queue:vk::Queue,
     pub graphics_queue_family_index:u32,
     pub graphics_queue_command_pool:vk::CommandPool,
     pub graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
+
+    pub render_pass_2d:RenderPass,
+    pub render_pass_3d:RenderPass,
 }
+/*
 impl Drop for Painter{
     fn drop(&mut self){
         unsafe{
@@ -144,11 +168,19 @@ impl Painter{
 
         //render quad
         //begin render pass
-        let clear_value=vk::ClearValue{
-            color:vk::ClearColorValue{
-                float32:[0.9,0.5,0.2,1.0],
+        let clear_values=vec![
+            vk::ClearValue{
+                color:vk::ClearColorValue{
+                    float32:[0.9,0.5,0.2,1.0],
+                },
             },
-        };
+            vk::ClearValue{
+                depth_stencil:vk::ClearDepthStencilValue{
+                    depth:1.0,
+                    stencil:0,
+                },
+            },
+        ];
         let render_pass_begin_info=vk::RenderPassBeginInfo{
             render_pass:self.render_pass,
             framebuffer:framebuffer,
@@ -159,8 +191,8 @@ impl Painter{
                 },
                 extent:window_extent
             },
-            clear_value_count:1,
-            p_clear_values:&clear_value,
+            clear_value_count:clear_values.len() as u32,
+            p_clear_values:clear_values.as_ptr(),
             ..Default::default()
         };
         unsafe{
@@ -214,13 +246,38 @@ impl Painter{
             self.device.cmd_set_scissor(self.graphics_queue_command_buffers[0],0,&[scissor]);
         }
         //push constants
-        let eye=glm::vec3(2.0,2.0,2.0);
-        let target=glm::vec3(0.0,0.0,0.0);
+        let eye=glm::vec3(0.0,-1.0,2.0);
+        let target=glm::vec3(0.0,-1.0,0.0);
         let view=glm::look_at(&eye,&target,&glm::vec3(0.0,1.0,0.0));
 
-        let model=glm::rotate_x(&glm::identity::<f32,4>(),0.4);
+        let (scale_x,scale_y,scale_z)=(0.25,0.25,0.25);
+        let (rotate_x,rotate_y,rotate_z)=(180.0,170.0,0.0);
+        let (translate_x,translate_y,translate_z)=(0.0,0.0,0.0);
 
-        let projection=glm::perspective_fov(glm::radians(&glm::vec1(80.0)).x,2.0,2.0,0.001,1000.0);
+        let model=glm::translate(
+            &glm::scale(
+                &glm::rotate_x(
+                    &glm::rotate_y(            
+                        &glm::rotate_z(
+                            &glm::identity::<f32,4>(),
+                            glm::radians(&glm::vec1(rotate_z)).x,
+                        ),
+                        glm::radians(&glm::vec1(rotate_y)).x,
+                    ),
+                    glm::radians(&glm::vec1(rotate_x)).x,
+                ),
+                &glm::vec3(scale_x,scale_y,scale_z)
+            ),
+            &glm::vec3(translate_x,translate_y,translate_z)
+        );
+
+        let projection=glm::perspective_fov(
+            glm::radians(&glm::vec1(80.0)).x,
+            window_extent.width as f32,
+            window_extent.height as f32,
+            0.001,
+            1000.0
+        );
 
         //bind descriptor set for fragment shader
         unsafe{
@@ -279,3 +336,4 @@ impl Painter{
         }.unwrap();
     }
 }
+*/

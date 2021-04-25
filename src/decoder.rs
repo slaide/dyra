@@ -67,57 +67,48 @@ use ash::{
     extensions,
 };
 
+use std::str::FromStr;
+
+#[derive(Debug,Clone)]
+pub struct VertexCoordinates{
+    x:f32,
+    y:f32,
+    z:f32,
+    w:f32,
+}
+#[derive(Debug,Clone)]
+pub struct VertexTextureCoordinates{
+    u:f32,
+    v:f32,
+    w:f32,
+}
+#[derive(Debug,Clone)]
+pub struct TexturedVertex{
+    pub vertex_coordinates:VertexCoordinates,
+    pub vertex_texture_coordinates:VertexTextureCoordinates,
+}
 #[derive(Debug,Clone)]
 pub struct Vertex{
-    //space coordinates
-    pub x:f32,
-    pub y:f32,
-    pub z:f32,
-    pub w:f32,
-    //teture coordinates
-    pub u:f32,
-    pub v:f32,
-}
-impl Vertex{
-    pub fn new(
-        x:f32,
-        y:f32,
-        z:f32,
-        w:f32,
-        u:f32,
-        v:f32,
-    )->Self{
-        Self{
-            x,
-            y,
-            z,
-            w,
-            u,
-            v,
-        }
-    }
+    pub vertex_coordinates:VertexCoordinates,
 }
 
+//polygon face with indices of vertices in related vertex list
 #[derive(Debug,Clone,Copy)]
-pub struct VertexIndices{
+pub struct Face{
     a:u16,
     b:u16,
     c:u16,
 }
-impl VertexIndices{
-    pub fn new(a:u16,b:u16,c:u16)->Self{
-        Self{
-            a,
-            b,
-            c,
-        }
-    }
-}
 
+#[derive(Debug,Clone)]
+pub enum VertexData{
+    textured(TexturedVertex),
+    plain(Vertex)
+}
 #[derive(Debug,Clone)]
 pub struct Mesh{
     pub vertices:IntegratedBuffer,
-    pub vertex_indices:IntegratedBuffer,
+    pub vertex_indices:Option<IntegratedBuffer>,
 }
 
 #[derive(Debug,Clone,Copy)]
@@ -126,6 +117,10 @@ pub struct IntegratedBuffer{
     pub item_count:u64,
     pub buffer:vk::Buffer,
     pub memory:vk::DeviceMemory,
+}
+pub struct StagingBuffer{
+    pub buffer:IntegratedBuffer,
+    pub buffer_in_use_size:u64,
 }
 
 #[derive(Debug,Clone,Copy)]
@@ -144,13 +139,13 @@ pub struct Decoder{
 
     pub device_memory_properties:vk::PhysicalDeviceMemoryProperties,
 
-    pub staging_buffer:IntegratedBuffer,
-    pub staging_buffer_in_use_size:u64,
+    pub staging_buffers:Vec<StagingBuffer>,
 
     pub meshes:std::collections::HashMap<&'static str,std::sync::Arc<Mesh>>,
 
     pub textures:std::collections::HashMap<&'static str,std::sync::Arc<Image>>,
 }
+/*
 impl Decoder{
     pub fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
         self.allocation_callbacks.as_ref()
@@ -161,17 +156,74 @@ impl Decoder{
             return mesh.clone();
         }
 
-        let file_content=std::fs::read_to_string(name).unwrap();
-        let set=obj::obj::parse(file_content.as_str()).unwrap();
-        let quad=set.objects[0].clone();
+        let (vertices,vertex_indices)={
+            let file_content=std::fs::read_to_string(name).unwrap();
 
-        assert!(quad.vertices.len()==quad.tex_vertices.len());
+            let lines=file_content.split('\n');
+            assert!(lines.next().unwrap()=="#settings");
 
-        let vertices:Vec<Vertex>=quad.vertices.iter().zip(quad.tex_vertices.iter()).map(|(v,vt)| Vertex::new(v.x as f32,v.y as f32,v.z as f32,1.0,vt.u as f32,vt.v as f32)).collect();
-        let vertex_indices:Vec<VertexIndices>=quad.geometry[0].shapes.iter().map(|s| match s.primitive{
-            obj::obj::Primitive::Triangle(i0,i1,i2)=>VertexIndices::new(i0.0 as u16,i1.0 as u16,i2.0 as u16),
-            _=>panic!("non-triangle shape")
-        }).collect();
+            let line=lines.next().unwrap().split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="vertex_coordinate_count");
+            let vertex_coordinate_count=u32::from_str(line.next().unwrap());
+
+            let line=lines.next().unwrap().split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="vertex_texture_coordinates");
+            let vertex_texture_coordinates=line.next().unwrap()=="true";
+
+            let line=lines.next().unwrap().split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="vertex_count");
+            let vertex_count=u32::from_str(line.next().unwrap());
+
+            let line=lines.next().unwrap().split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="face_count");
+            let face_count=u32::from_str(line.next().unwrap());
+
+            let line=lines.next().unwrap().split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="vertex_data_interleaved_input");
+            let vertex_data_interleaved_input=line.next().unwrap()=="true";
+
+            let line=lines.next().unwrap().split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="vertex_data_interleaved_output");
+            let vertex_data_interleaved_output=line.next().unwrap()=="true";
+
+            let line=lines.next().unwrap().split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="vertex_data_interleaved_output");
+            let vertex_data_interleaved_output=line.next().unwrap()=="true";
+
+            assert!(lines.next().unwrap()=="#defaults");
+
+            let default_v_x=0.0;
+            let default_v_y=0.0;
+            let default_v_z=0.0;
+            let default_v_w=0.0;
+            let default_vt_u=0.0;
+            let default_vt_v=0.0;
+            let default_vt_w=0.0;
+
+            for line in {
+                println!("{}",line);
+            }
+
+            let quad=set.objects[0].clone();
+
+            //assert!(quad.vertices.len()==quad.tex_vertices.len());
+
+            //let vertices:Vec<Vertex>=quad.vertices.iter().zip(quad.tex_vertices.iter()).map(|(v,vt)| Vertex::new(v.x as f32,v.y as f32,v.z as f32,1.0,vt.u as f32,vt.v as f32)).collect();
+            let vertices:Vec<Vertex>=quad.vertices.iter().map(|v| Vertex::new(v.x as f32,v.y as f32,v.z as f32,1.0,v.x as f32,v.y as f32)).collect();
+            let vertex_indices:Vec<VertexIndices>=quad.geometry[0].shapes.iter().map(|s| match s.primitive{
+                obj::obj::Primitive::Triangle(i0,i1,i2)=>VertexIndices::new(i0.0 as u16,i1.0 as u16,i2.0 as u16),
+                _=>panic!("non-triangle shape")
+            }).collect();
+
+            (vertices,vertex_indices)
+        };
 
         let (vertices_size,vertices_buffer,vertices_memory)={
             let size=(vertices.len() * std::mem::size_of::<Vertex>()) as u64;
@@ -684,3 +736,4 @@ impl Drop for Decoder{
 
     }
 }
+*/

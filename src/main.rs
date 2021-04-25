@@ -108,12 +108,6 @@ pub struct Object{
     pub mesh:std::sync::Arc<Mesh>,
     pub texture:std::sync::Arc<Image>,
 }
-pub struct GraphicsPipeline{
-    layout:vk::PipelineLayout,
-    pipeline:vk::Pipeline,
-    vertex:vk::ShaderModule,
-    fragment:vk::ShaderModule,
-}
 
 #[cfg(target_os="windows")]
 static mut WINDOWS_WINDOW_EVENTS:Vec<Event>=Vec::new();
@@ -590,9 +584,191 @@ impl Manager{
             }
         }
 
+        let device_memory_properties=unsafe{
+            instance.get_physical_device_memory_properties(physical_device)
+        };
+
         //Painter related stuff
         let painter;
+        let depth_image;
+        let depth_image_view;
         {
+            let depth_image_create_info=vk::ImageCreateInfo{
+                image_type:vk::ImageType::TYPE_2D,
+                format:vk::Format::D32_SFLOAT,
+                extent:vk::Extent3D{
+                    width:600,
+                    height:400,
+                    depth:1,
+                },
+                mip_levels:1,
+                array_layers:1,
+                samples:vk::SampleCountFlags::TYPE_1,
+                tiling:vk::ImageTiling::OPTIMAL,
+                usage:vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                sharing_mode:vk::SharingMode::EXCLUSIVE,
+                initial_layout:vk::ImageLayout::UNDEFINED,
+                ..Default::default()
+            };
+            depth_image=unsafe{
+                device.create_image(&depth_image_create_info,temp_allocation_callbacks)
+            }.unwrap();
+
+            let mut memory=vk::DeviceMemory::null();
+            {
+                let image_memory_reqirements=unsafe{
+                    device.get_image_memory_requirements(depth_image)
+                };
+    
+                for i in 0..device_memory_properties.memory_type_count{
+                    if (image_memory_reqirements.memory_type_bits & (1<<i))>0 &&
+                        device_memory_properties.memory_types[i as usize].property_flags
+                            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                    {
+                        let memory_allocate_info=vk::MemoryAllocateInfo{
+                            allocation_size:image_memory_reqirements.size,
+                            memory_type_index:i,
+                            ..Default::default()
+                        };
+                        //allocate image memory
+                        unsafe{
+                            memory=device.allocate_memory(&memory_allocate_info, temp_allocation_callbacks).unwrap()
+                        }
+                        
+                        //bind memory to image handle
+                        unsafe{
+                            device.bind_image_memory(depth_image, memory, 0)
+                        }.unwrap();
+    
+                        let offset=self.staging_buffer_in_use_size;//offset mesh data because staging buffer is used mesh and texture upload, with no synchronization against each other (could do that, somehow?)
+                        self.staging_buffer_in_use_size+=image_memory_reqirements.size;
+    
+                        //map staging memory
+                        let memory_pointer=unsafe{
+                            device.map_memory(self.staging_buffer.memory, offset, image_memory_reqirements.size, vk::MemoryMapFlags::empty())
+                        }.unwrap();
+    
+                        //copy image data to staging
+                        unsafe{
+                            libc::memcpy(memory_pointer,depth_image.into_raw().as_mut_ptr() as *mut libc::c_void,image_memory_reqirements.size as usize);
+                        }
+    
+                        //flush staging and unmap after
+                        let flush_range=vk::MappedMemoryRange{
+                            memory:self.staging_buffer.memory,
+                            offset,
+                            size:image_memory_reqirements.size,
+                            ..Default::default()
+                        };
+                        unsafe{
+                            device.flush_mapped_memory_ranges(&[flush_range]).unwrap();
+                            device.unmap_memory(self.staging_buffer.memory);
+                        }
+    
+                        //schedule image data transfer from staging to final
+                        
+                        let image_subresource_range=vk::ImageSubresourceRange{
+                            aspect_mask:vk::ImageAspectFlags::COLOR,
+                            base_mip_level:0,
+                            level_count:1,
+                            base_array_layer:0,
+                            layer_count:1,
+                        };
+                        let image_memory_barrier_none_to_transfer = vk::ImageMemoryBarrier{
+                            src_access_mask:vk::AccessFlags::empty(),
+                            dst_access_mask:vk::AccessFlags::TRANSFER_WRITE,
+                            old_layout:vk::ImageLayout::UNDEFINED,
+                            new_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                            dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                            image:depth_image,
+                            subresource_range:image_subresource_range,
+                            ..Default::default()
+                        };
+                        unsafe{
+                            //perform buffer layout transition from copy target to vertex data source
+                            device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_none_to_transfer]);
+                        }
+    
+                        let buffer_image_copy_info=vk::BufferImageCopy{
+                            buffer_offset:offset,
+                            buffer_row_length:0,
+                            buffer_image_height:0,
+                            image_subresource:vk::ImageSubresourceLayers{
+                                aspect_mask:vk::ImageAspectFlags::COLOR,
+                                mip_level:0,
+                                base_array_layer:0,
+                                layer_count:1,
+                            },
+                            image_offset:vk::Offset3D{
+                                x:0,
+                                y:0,
+                                z:0,
+                            },
+                            image_extent:vk::Extent3D{
+                                width,
+                                height,
+                                depth:1,
+                            },
+                            ..Default::default()
+                        };
+                        unsafe{
+                            self.device.cmd_copy_buffer_to_image(command_buffer, self.staging_buffer.buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy_info]);
+                        }
+                        
+                        let image_subresource_range=vk::ImageSubresourceRange{
+                            aspect_mask:vk::ImageAspectFlags::COLOR,
+                            base_mip_level:0,
+                            level_count:1,
+                            base_array_layer:0,
+                            layer_count:1,
+                        };
+                        let image_memory_barrier_transfer_to_shader_read = vk::ImageMemoryBarrier{
+                            src_access_mask:vk::AccessFlags::TRANSFER_WRITE,
+                            dst_access_mask:vk::AccessFlags::SHADER_READ,
+                            old_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            new_layout:vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                            dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                            image,
+                            subresource_range:image_subresource_range,
+                            ..Default::default()
+                        };
+                        unsafe{
+                            self.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_transfer_to_shader_read]);
+                        }
+    
+                        break;
+                    }
+                }
+            };
+            if memory==vk::DeviceMemory::null(){
+                panic!("no fit memory found!");
+            }
+
+            let depth_image_view_create_info=vk::ImageViewCreateInfo{
+                image:depth_image,
+                view_type:vk::ImageViewType::TYPE_2D,
+                format:depth_image_create_info.format,
+                components:vk::ComponentMapping{
+                    r:vk::ComponentSwizzle::IDENTITY,
+                    g:vk::ComponentSwizzle::IDENTITY,
+                    b:vk::ComponentSwizzle::IDENTITY,
+                    a:vk::ComponentSwizzle::IDENTITY,
+                },
+                subresource_range:vk::ImageSubresourceRange{
+                    aspect_mask:vk::ImageAspectFlags::DEPTH,
+                    base_mip_level:0,
+                    level_count:1,
+                    base_array_layer:0,
+                    layer_count:1,
+                },
+                ..Default::default()
+            };
+            depth_image_view=unsafe{
+                device.create_image_view(&depth_image_view_create_info,temp_allocation_callbacks)
+            }.unwrap();
+
             let render_pass={
                 let render_pass_attachment_descriptions=vec![
                     vk::AttachmentDescription{
@@ -603,19 +779,33 @@ impl Manager{
                         initial_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                         final_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                         ..Default::default()
+                    },
+                    vk::AttachmentDescription{
+                        format:depth_image_view_create_info.format,
+                        samples:vk::SampleCountFlags::TYPE_1,
+                        load_op:vk::AttachmentLoadOp::CLEAR,
+                        store_op:vk::AttachmentStoreOp::DONT_CARE,
+                        initial_layout:vk::ImageLayout::UNDEFINED,
+                        final_layout:vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        ..Default::default()
                     }
                 ];
                 let render_pass_subpass_color_attachment_references=vec![
                     vk::AttachmentReference{
                         attachment:0,
-                        layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    }
+                        layout:render_pass_attachment_descriptions[0].final_layout,
+                    },
                 ];
+                let render_pass_subpass_depth_attachment_reference=vk::AttachmentReference{
+                    attachment:1,
+                    layout:render_pass_attachment_descriptions[1].final_layout,
+                };
                 let render_pass_subpass_descriptions=vec![
                     vk::SubpassDescription{
                         pipeline_bind_point:vk::PipelineBindPoint::GRAPHICS,
                         color_attachment_count:render_pass_subpass_color_attachment_references.len() as u32,
                         p_color_attachments:render_pass_subpass_color_attachment_references.as_ptr(),
+                        p_depth_stencil_attachment:&render_pass_subpass_depth_attachment_reference,
                         ..Default::default()
                     }
                 ];
@@ -961,13 +1151,13 @@ impl Manager{
                 layout:graphics_pipeline_layout_2d,
                 pipeline:graphics_pipelines[0],
                 vertex:vertex_2d,
-                fragment:fragment_2d
+                fragment:fragment_2d,
             };
             let graphics_pipeline_3d=GraphicsPipeline{
                 layout:graphics_pipeline_layout_3d,
                 pipeline:graphics_pipelines[1],
                 vertex:vertex_3d,
-                fragment:fragment_3d
+                fragment:fragment_3d,
             };
             
             painter=std::mem::ManuallyDrop::new(Painter{
@@ -984,6 +1174,8 @@ impl Manager{
                 descriptor_set,
 
                 render_pass,
+                depth_image,
+                depth_image_view,
 
                 graphics_pipeline_2d,
                 graphics_pipeline_3d,
@@ -999,7 +1191,7 @@ impl Manager{
 
         let decoder={
             //create staging buffer for resource upload with fixed size (should be enough for this exercise)
-            let buffer_size=10*1024*1024;
+            let buffer_size=50*1024*1024;
             let buffer_create_info=vk::BufferCreateInfo{
                 size:buffer_size,
                 usage:vk::BufferUsageFlags::TRANSFER_SRC,
@@ -1471,10 +1663,14 @@ impl Manager{
         }).collect();
 
         let swapchain_image_framebuffers:Vec<vk::Framebuffer>=swapchain_image_views.iter().map(|view|{
+            let attachments=vec![
+                *view,
+                self.painter.depth_image_view,
+            ];
             let framebuffer_create_info=vk::FramebufferCreateInfo{
                 render_pass:self.painter.render_pass,
-                attachment_count:1,
-                p_attachments:view,
+                attachment_count:attachments.len() as u32,
+                p_attachments:attachments.as_ptr(),
                 width:swapchain_extent.width,
                 height:swapchain_extent.height,
                 layers:1,
@@ -1717,7 +1913,8 @@ impl Manager{
             };
 
             //record mesh upload
-            let quad_data=self.decoder.get_mesh("quad.obj",self.painter.graphics_queue_command_buffers[0]);
+            //let quad_data=self.decoder.get_mesh("quad.obj",self.painter.graphics_queue_command_buffers[0]);
+            let quad_data=self.decoder.get_mesh("bunny.obj",self.painter.graphics_queue_command_buffers[0]);
 
             //record texture upload (use staging buffer range outside of potential mesh upload range)
             let intel_truck=self.decoder.get_texture("inteltruck.png", self.painter.graphics_queue_command_buffers[0]);
@@ -1866,6 +2063,7 @@ impl Manager{
         }
     }
 }
+/*
 impl Drop for Manager{
     fn drop(&mut self){
         //finish all gpu interaction, which may include window system interaction before window and vulkan resourse destruction
@@ -1895,6 +2093,7 @@ impl Drop for Manager{
         self.window_manager_handle.destroy();
     }
 }
+*/
 
 fn main() {
     let mut manager=Manager::new();

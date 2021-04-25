@@ -14,10 +14,12 @@ out gl_PerVertex{
 };
 
 layout(location=0) out vec4 v_Color;
+layout(location=1) out vec4 v_Position;
 
 void main(){
-    gl_Position=constants.view*constants.model*i_Position;
-    gl_Position=constants.projection*constants.view*constants.model*i_Position;
+    vec4 position=constants.projection*constants.view*constants.model*i_Position;
+    gl_Position=position;
 
     v_Color=i_Color;
+    v_Position=position;
 }
