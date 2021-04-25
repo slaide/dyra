@@ -67,6 +67,7 @@ use ash::{
     extensions,
 };
 
+#[derive(Debug,Clone)]
 pub struct Vertex{
     //space coordinates
     pub x:f32,
@@ -96,6 +97,8 @@ impl Vertex{
         }
     }
 }
+
+#[derive(Debug,Clone,Copy)]
 pub struct VertexIndices{
     a:u16,
     b:u16,
@@ -144,58 +147,32 @@ pub struct Decoder{
     pub staging_buffer:IntegratedBuffer,
     pub staging_buffer_in_use_size:u64,
 
-    pub meshes:std::collections::HashMap<&'static str,Mesh>,
+    pub meshes:std::collections::HashMap<&'static str,std::sync::Arc<Mesh>>,
 
-    pub textures:std::collections::HashMap<&'static str,Image>,
+    pub textures:std::collections::HashMap<&'static str,std::sync::Arc<Image>>,
 }
 impl Decoder{
     pub fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
         self.allocation_callbacks.as_ref()
     }
 
-    pub fn get_quad(&mut self,command_buffer:vk::CommandBuffer)->Mesh{
-        if let Some(quad)=self.meshes.get("quad"){
-            return quad.clone();
+    pub fn get_mesh(&mut self,name:&'static str,command_buffer:vk::CommandBuffer)->std::sync::Arc<Mesh>{
+        if let Some(mesh)=self.meshes.get(name){
+            return mesh.clone();
         }
-        
-        let quad_vertices=vec![
-            Vertex::new(
-                -0.7, -0.7, 0.0, 1.0,
-                0.0, 0.0,
-            ),
-            Vertex::new(
-                -0.7, 0.7, 0.0, 1.0,
-                0.0, 1.0,
-            ),
-            Vertex::new(
-                0.7, -0.7, 0.0, 1.0,
-                1.0, 0.0,
-            ),
 
-            Vertex::new(
-                -0.7, 0.7, 0.0, 1.0,
-                0.0, 1.0,
-            ),
-            Vertex::new(
-                0.7, 0.7, 0.0, 1.0,
-                1.0, 1.0,
-            ),
-            Vertex::new(
-                0.7, -0.7, 0.0, 1.0,
-                1.0, 0.0,
-            ),
-        ];
+        let file_content=std::fs::read_to_string(name).unwrap();
+        let set=obj::obj::parse(file_content.as_str()).unwrap();
+        let quad=set.objects[0].clone();
 
-        let quad_vertex_indices=vec![
-            VertexIndices::new(0,1,2),
-            VertexIndices::new(3,4,5),
-        ];
+        assert!(quad.vertices.len()==quad.tex_vertices.len());
 
-        let mesh=self.upload_vertex_data("quad",&quad_vertices,&quad_vertex_indices,command_buffer);
-        mesh.clone()
-    }
+        let vertices:Vec<Vertex>=quad.vertices.iter().zip(quad.tex_vertices.iter()).map(|(v,vt)| Vertex::new(v.x as f32,v.y as f32,v.z as f32,1.0,vt.u as f32,vt.v as f32)).collect();
+        let vertex_indices:Vec<VertexIndices>=quad.geometry[0].shapes.iter().map(|s| match s.primitive{
+            obj::obj::Primitive::Triangle(i0,i1,i2)=>VertexIndices::new(i0.0 as u16,i1.0 as u16,i2.0 as u16),
+            _=>panic!("non-triangle shape")
+        }).collect();
 
-    pub fn upload_vertex_data(&mut self,name:&'static str, vertices:&Vec<Vertex>,vertex_indices:&Vec<VertexIndices>,command_buffer:vk::CommandBuffer)->&Mesh{
         let (vertices_size,vertices_buffer,vertices_memory)={
             let size=(vertices.len() * std::mem::size_of::<Vertex>()) as u64;
             let buffer_create_info=vk::BufferCreateInfo{
@@ -397,7 +374,7 @@ impl Decoder{
             self.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &buffer_memory_barriers[..], &[]);
         }
 
-        self.meshes.insert(name,Mesh{
+        let mesh=std::sync::Arc::new(Mesh{
             vertices:IntegratedBuffer{
                 buffer_size:vertices_size,
                 item_count:vertices.len() as u64,
@@ -412,7 +389,9 @@ impl Decoder{
             }
         });
 
-        self.meshes.get(name).unwrap()
+        self.meshes.insert(name,mesh.clone());
+
+        mesh
     }
 
     /*
@@ -466,10 +445,10 @@ impl Decoder{
     }
     */
 
-    pub fn get_texture(&mut self,filename:&'static str,command_buffer:vk::CommandBuffer)->Image{
+    pub fn get_texture(&mut self,filename:&'static str,command_buffer:vk::CommandBuffer)->std::sync::Arc<Image>{
         //return cached texture if present
         if let Some(texture)=self.textures.get(filename){
-            return *texture;
+            return texture.clone();
         }
 
         //read file from disk and decode into b8g8r8a8 format
@@ -665,18 +644,18 @@ impl Decoder{
             }
         };
 
-        let image=Image{
+        let image=std::sync::Arc::new(Image{
             width,
             height,
             format:vk::Format::R8G8B8A8_UNORM,
             memory,
             image,
             image_view,
-        };
+        });
 
-        self.textures.insert(filename,image);
+        self.textures.insert(filename,image.clone());
 
-        return image;
+        image
     }
 }
 impl Drop for Decoder{

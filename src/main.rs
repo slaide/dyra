@@ -14,6 +14,7 @@ extern crate libc;
 extern crate image;
 extern crate ash;
 extern crate nalgebra_glm as glm;
+extern crate wavefront_obj as obj;
 
 #[cfg(target_os="windows")]
 use winapi::{
@@ -104,8 +105,8 @@ pub mod painter;
 pub use painter::{Painter};
 
 pub struct Object{
-    pub mesh:Mesh,
-    pub texture:Image,
+    pub mesh:std::sync::Arc<Mesh>,
+    pub texture:std::sync::Arc<Image>,
 }
 pub struct GraphicsPipeline{
     layout:vk::PipelineLayout,
@@ -1716,7 +1717,7 @@ impl Manager{
             };
 
             //record mesh upload
-            let quad_data=self.decoder.get_quad(self.painter.graphics_queue_command_buffers[0]);
+            let quad_data=self.decoder.get_mesh("quad.obj",self.painter.graphics_queue_command_buffers[0]);
 
             //record texture upload (use staging buffer range outside of potential mesh upload range)
             let intel_truck=self.decoder.get_texture("inteltruck.png", self.painter.graphics_queue_command_buffers[0]);
@@ -1749,7 +1750,7 @@ impl Manager{
                 self.open_windows[0].swapchain_image_framebuffers[image_index as usize],
                 self.open_windows[0].extent,
                 &vec![Object{
-                    mesh:quad_data,
+                    mesh:quad_data.clone(),
                     texture:intel_truck
                 }],
                 self.open_windows[0].image_transferable

@@ -180,8 +180,8 @@ impl Painter{
         };
         let scissor=vk::Rect2D{
             offset:vk::Offset2D{
-            x:0,
-            y:0,  
+                x:0,
+                y:0,  
             },
             extent:vk::Extent2D{
                 width:window_extent.width,
