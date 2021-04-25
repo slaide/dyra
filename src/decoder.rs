@@ -137,8 +137,6 @@ pub struct Image{
 pub struct Decoder{
     pub allocation_callbacks:Option<vk::AllocationCallbacks>,
 
-    #[allow(dead_code)]
-    pub instance:Instance,
     pub device:Device,
 
     pub device_memory_properties:vk::PhysicalDeviceMemoryProperties,
@@ -149,9 +147,6 @@ pub struct Decoder{
     pub meshes:std::collections::HashMap<&'static str,Mesh>,
 
     pub textures:std::collections::HashMap<&'static str,Image>,
-
-    pub vertex_shaders:std::collections::HashMap<&'static str,vk::ShaderModule>,
-    pub fragment_shaders:std::collections::HashMap<&'static str,vk::ShaderModule>,
 }
 impl Decoder{
     pub fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
@@ -419,6 +414,7 @@ impl Decoder{
 
         self.meshes.get(name).unwrap()
     }
+
     /*
     pub fn new_staging(&mut self,size:u64)->IntegratedBuffer{
         let buffer_create_info=vk::BufferCreateInfo{
@@ -470,7 +466,7 @@ impl Decoder{
     }
     */
 
-    pub fn get_texture(&mut self,filename:&'static str,format:vk::Format,command_buffer:vk::CommandBuffer)->Image{
+    pub fn get_texture(&mut self,filename:&'static str,command_buffer:vk::CommandBuffer)->Image{
         //return cached texture if present
         if let Some(texture)=self.textures.get(filename){
             return *texture;
@@ -485,7 +481,7 @@ impl Decoder{
         let image={
             let image_create_info=vk::ImageCreateInfo{
                 image_type:vk::ImageType::TYPE_2D,
-                format,
+                format:vk::Format::R8G8B8A8_UNORM,
                 extent:vk::Extent3D{
                     width,
                     height,
@@ -654,7 +650,7 @@ impl Decoder{
             let image_view_create_info=vk::ImageViewCreateInfo{
                 image,
                 view_type:vk::ImageViewType::TYPE_2D,
-                format,
+                format:vk::Format::R8G8B8A8_UNORM,
                 components:vk::ComponentMapping{
                     r:vk::ComponentSwizzle::IDENTITY,
                     g:vk::ComponentSwizzle::IDENTITY,
@@ -672,7 +668,7 @@ impl Decoder{
         let image=Image{
             width,
             height,
-            format,
+            format:vk::Format::R8G8B8A8_UNORM,
             memory,
             image,
             image_view,
@@ -690,16 +686,6 @@ impl Drop for Decoder{
                 self.device.destroy_image_view(texture.image_view,self.get_allocation_callbacks());
                 self.device.destroy_image(texture.image,self.get_allocation_callbacks());
                 self.device.free_memory(texture.memory,self.get_allocation_callbacks());
-            }
-        }
-        for (_name,shader) in self.vertex_shaders.iter(){
-            unsafe{
-                self.device.destroy_shader_module(*shader,self.get_allocation_callbacks());
-            }
-        }
-        for (_name,shader) in self.fragment_shaders.iter(){
-            unsafe{
-                self.device.destroy_shader_module(*shader,self.get_allocation_callbacks());
             }
         }
         for (_name,mesh) in self.meshes.iter(){
