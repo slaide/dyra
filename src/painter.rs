@@ -101,6 +101,23 @@ pub struct RenderPass{
     //rendering from this pass done
     pub rendering_done:vk::Semaphore,
 }
+impl RenderPass{
+    pub fn new()->Self{
+        Self{
+            render_pass:vk::RenderPass::null(),
+
+            color_image:vk::Image::null(),
+            color_image_view:vk::ImageView::null(),
+
+            depth_image:vk::Image::null(),
+            depth_image_view:vk::ImageView::null(),
+
+            pipelines:std::collections::HashMap::new(),
+
+            rendering_done:vk::Semaphore::null(),
+        }
+    }
+}
 
 pub struct Painter{
     pub allocation_callbacks:Option<vk::AllocationCallbacks>,
@@ -109,10 +126,7 @@ pub struct Painter{
 
     pub swapchain_surface_format:vk::SurfaceFormatKHR,
 
-    pub graphics_queue:vk::Queue,
-    pub graphics_queue_family_index:u32,
-    pub graphics_queue_command_pool:vk::CommandPool,
-    pub graphics_queue_command_buffers:Vec<vk::CommandBuffer>,
+    pub graphics_queue:std::sync::Arc<crate::Queue>,
 
     pub render_pass_2d:RenderPass,
     pub render_pass_3d:RenderPass,
