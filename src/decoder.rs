@@ -102,8 +102,8 @@ pub struct Face{
 
 #[derive(Debug,Clone)]
 pub enum VertexData{
-    textured(TexturedVertex),
-    plain(Vertex)
+    Textured(TexturedVertex),
+    Plain(Vertex)
 }
 #[derive(Debug,Clone)]
 pub struct Mesh{

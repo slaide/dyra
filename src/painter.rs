@@ -119,12 +119,30 @@ impl RenderPass{
     }
 }
 
+pub struct WindowAttachments{
+    pub surface:vk::SurfaceKHR,
+
+    pub image_available:vk::Semaphore,
+    pub image_transferable:vk::Semaphore,
+    pub image_presentable:vk::Semaphore,
+    
+    pub swapchain:extensions::khr::Swapchain,
+    pub swapchain_handle:vk::SwapchainKHR,
+    pub swapchain_images:Vec<vk::Image>,
+    pub swapchain_image_views:Vec<vk::ImageView>,
+    pub swapchain_image_framebuffers:Vec<vk::Framebuffer>,
+}
+
 pub struct Painter{
     pub allocation_callbacks:Option<vk::AllocationCallbacks>,
 
     pub device:Device,
 
+    pub present_queue:std::sync::Arc<crate::Queue>,
+
     pub swapchain_surface_format:vk::SurfaceFormatKHR,
+
+    pub window_attachments:std::collections::HashMap<u32,WindowAttachments>,
 
     pub graphics_queue:std::sync::Arc<crate::Queue>,
 
@@ -157,10 +175,13 @@ impl Drop for Painter{
         }
     }
 }
+*/
+
 impl Painter{
     fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
         self.allocation_callbacks.as_ref()
     }
+    #[cfg(disabled)]
     pub fn draw(&mut self,framebuffer:vk::Framebuffer,window_extent:vk::Extent2D,objects:&Vec<Object>,done:vk::Semaphore){
         //record graphics command buffer
         //begin
@@ -349,5 +370,175 @@ impl Painter{
             self.device.queue_submit(self.graphics_queue,&[submit_info_graphics],vk::Fence::null())
         }.unwrap();
     }
+
+    #[cfg(disabled)]
+    pub fn add_window(&mut self,window_id:u32){
+        
+                  
+        //vulkan spec states this must be done
+        if unsafe{
+            !self.surface.get_physical_device_surface_support(self.physical_device, self.painter.present_queue.family_index, surface).unwrap()
+        }{
+            panic!("new surface does not support presentation like the temporary ones");
+        }
+
+        //create swapchain
+        let image_available=self.create_semaphore().unwrap();
+        let image_transferable=self.create_semaphore().unwrap();
+        let image_presentable=self.create_semaphore().unwrap();
+
+        let surface_capabilities=unsafe{
+            self.surface.get_physical_device_surface_capabilities(self.physical_device, surface)
+        }.unwrap();
+
+        let mut image_count:u32=surface_capabilities.min_image_count+1;
+        if surface_capabilities.max_image_count>0 && image_count>surface_capabilities.max_image_count{
+            image_count=surface_capabilities.max_image_count;
+        }
+
+        let surface_formats=unsafe{
+            self.surface.get_physical_device_surface_formats(self.physical_device, surface)
+        }.unwrap();
+        //use first available format, but check for two 'better' alternatives
+        let mut surface_format=surface_formats[0];
+        //if the only supported format is 'undefined', there is no preferred format for the surface
+        //then use 'most widely used' format
+        if surface_formats.len()==1 && surface_format.format==vk::Format::UNDEFINED{
+            surface_format=vk::SurfaceFormatKHR{
+                format:vk::Format::R8G8B8A8_UNORM,
+                color_space:vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            };
+        }else{
+            for format in surface_formats.iter(){
+                if format.format==vk::Format::R8G8B8A8_UNORM{
+                    surface_format=*format;
+                }
+            }
+        }
+
+        //set extent to current extent, according to surface
+        //if that is not available (indicated by special values of 'current extent')
+        //extent will be specified by swapchain specs, which are those used for the 
+        //creation of this window
+        let mut swapchain_extent=surface_capabilities.current_extent;
+        if swapchain_extent.width==u32::MAX || swapchain_extent.height==u32::MAX{
+            swapchain_extent.width=width as u32;
+            swapchain_extent.height=height as u32;
+            if swapchain_extent.width<surface_capabilities.min_image_extent.width{
+                swapchain_extent.width=surface_capabilities.min_image_extent.width;
+            }
+            if swapchain_extent.height<surface_capabilities.min_image_extent.height{
+                swapchain_extent.height=surface_capabilities.min_image_extent.height;
+            }
+            if swapchain_extent.width>surface_capabilities.max_image_extent.width{
+                swapchain_extent.width=surface_capabilities.max_image_extent.width;
+            }
+            if swapchain_extent.height>surface_capabilities.max_image_extent.height{
+                swapchain_extent.height=surface_capabilities.max_image_extent.height;
+            }
+        }
+
+        let swapchain_surface_usage_flags=vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST;
+        if !surface_capabilities.supported_usage_flags.contains(swapchain_surface_usage_flags){
+            panic!("surface capabilities");
+        }
+
+        let swapchain_surface_transform=if surface_capabilities.supported_transforms.contains(vk::SurfaceTransformFlagsKHR::IDENTITY){
+            vk::SurfaceTransformFlagsKHR::IDENTITY
+        }else{
+            surface_capabilities.current_transform
+        };
+
+        let surface_present_modes=unsafe{
+            self.surface.get_physical_device_surface_present_modes(self.physical_device, surface)
+        }.unwrap();
+        let swapchain_surface_present_mode=if surface_present_modes.contains(&vk::PresentModeKHR::MAILBOX){
+            vk::PresentModeKHR::MAILBOX
+        }else{
+            vk::PresentModeKHR::FIFO
+        };
+
+        //queue family indices accessing the swapchain (e.g. presenting to it), for which we have a dedicated queue
+        let queue_family_indices=vec![
+            self.painter.present_queue.family_index,
+        ];
+        let swapchain_create_info=vk::SwapchainCreateInfoKHR{
+            surface,
+            min_image_count:image_count,
+            image_format:surface_format.format,
+            image_color_space:surface_format.color_space,
+            image_extent:swapchain_extent,
+            image_array_layers:1,
+            image_usage:swapchain_surface_usage_flags,
+            image_sharing_mode:vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count:queue_family_indices.len() as u32,
+            p_queue_family_indices:queue_family_indices.as_ptr(),
+            pre_transform:swapchain_surface_transform,
+            composite_alpha:vk::CompositeAlphaFlagsKHR::OPAQUE,
+            present_mode:swapchain_surface_present_mode,
+            clipped:false as u32,
+            ..Default::default()
+        };
+        let swapchain=extensions::khr::Swapchain::new(&self.instance,&self.device);
+        let swapchain_handle=unsafe{
+            swapchain.create_swapchain(&swapchain_create_info, self.get_allocation_callbacks())
+        }.unwrap();
+
+        //images may only be created when this function is valled, so presenting an image index before
+        //this function is called violate the specs (the image may not exist yet)
+        let swapchain_images=unsafe{
+            swapchain.get_swapchain_images(swapchain_handle)
+        }.unwrap();
+
+        let subresource_range=vk::ImageSubresourceRange{
+            aspect_mask:vk::ImageAspectFlags::COLOR,
+            base_mip_level:0,
+            level_count:1,
+            base_array_layer:0,
+            layer_count:1,
+            ..Default::default()
+        };     
+
+        let swapchain_image_views:Vec<vk::ImageView>=swapchain_images.iter().map(|image|{
+            let image_view_create_info=vk::ImageViewCreateInfo{
+                image:*image,
+                view_type:vk::ImageViewType::TYPE_2D,
+                format:self.swapchain_surface_format.format,
+                components:vk::ComponentMapping{
+                    r:vk::ComponentSwizzle::IDENTITY,
+                    g:vk::ComponentSwizzle::IDENTITY,
+                    b:vk::ComponentSwizzle::IDENTITY,
+                    a:vk::ComponentSwizzle::IDENTITY,
+                },
+                subresource_range,
+                ..Default::default()
+            };
+            unsafe{
+                self.device.create_image_view(&image_view_create_info, self.get_allocation_callbacks())
+            }.unwrap()
+        }).collect();
+
+        let swapchain_image_framebuffers:Vec<vk::Framebuffer>=Vec::new();/*swapchain_image_views.iter().map(|view|{
+            let attachments=vec![
+                *view,
+            ];
+            let framebuffer_create_info=vk::FramebufferCreateInfo{
+                render_pass:self.painter.render_pass,
+                attachment_count:attachments.len() as u32,
+                p_attachments:attachments.as_ptr(),
+                width:swapchain_extent.width,
+                height:swapchain_extent.height,
+                layers:1,
+                ..Default::default()
+            };
+            unsafe{
+                self.device.create_framebuffer(&framebuffer_create_info, self.get_allocation_callbacks())
+            }.unwrap()
+        }).collect();
+        */
+        
+        let _=WindowAttachments{
+
+        };
+    }
 }
-*/

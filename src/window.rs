@@ -90,15 +90,11 @@ pub enum WindowHandle{
     NeverMatch
 }
 pub struct Window{
+    pub id:u32,
+
     pub extent:vk::Extent2D,
+
     pub handle:WindowHandle,
+
     pub surface:vk::SurfaceKHR,
-    pub image_available:vk::Semaphore,
-    pub image_transferable:vk::Semaphore,
-    pub image_presentable:vk::Semaphore,
-    pub swapchain:extensions::khr::Swapchain,
-    pub swapchain_handle:vk::SwapchainKHR,
-    pub swapchain_images:Vec<vk::Image>,
-    pub swapchain_image_views:Vec<vk::ImageView>,
-    pub swapchain_image_framebuffers:Vec<vk::Framebuffer>,
 }
