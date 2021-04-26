@@ -115,9 +115,8 @@ pub struct Queue{
     command_pool:vk::CommandPool,
     command_buffers:Vec<vk::CommandBuffer>,
 }
-/*
 impl Queue{
-    pub fn new_command_buffer(&mut self,device:&vk::Device)->vk::CommandBuffer{
+    pub fn new_command_buffer(&mut self,device:&mut vk::Device)->vk::CommandBuffer{
        let command_buffers_create_info=vk::CommandBufferAllocateInfo{
             command_pool:self.command_pool,
             level:vk::CommandBufferLevel::PRIMARY,
@@ -135,7 +134,7 @@ impl Queue{
         command_buffer
     }
 }
-*/
+
 #[cfg(target_os="windows")]
 static mut WINDOWS_WINDOW_EVENTS:Vec<Event>=Vec::new();
 #[cfg(target_os="windows")]
