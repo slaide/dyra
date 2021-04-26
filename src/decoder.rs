@@ -133,9 +133,7 @@ pub struct Image{
     pub image_view:vk::ImageView,
 }
 pub struct Decoder{
-    pub allocation_callbacks:Option<vk::AllocationCallbacks>,
-
-    pub device:Device,
+    pub vulkan:std::sync::Arc<crate::VulkanBase>,
 
     pub device_memory_properties:vk::PhysicalDeviceMemoryProperties,
 
