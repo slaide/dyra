@@ -139,6 +139,8 @@ pub struct Decoder{
 
     pub device_memory_properties:vk::PhysicalDeviceMemoryProperties,
 
+    pub transfer_queue:std::sync::Arc<crate::Queue>,
+
     pub staging_buffers:Vec<StagingBuffer>,
 
     pub meshes:std::collections::HashMap<&'static str,std::sync::Arc<Mesh>>,
