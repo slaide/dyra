@@ -84,7 +84,6 @@ use ash::{
     extensions,
 };
 
-
 pub mod event;
 pub use event::{Event};
 
@@ -110,9 +109,45 @@ pub struct VulkanBase{
     physical_device:PhysicalDevice,
     device:Device,
 }
+
+unsafe impl Send for VulkanBase{}
+unsafe impl Sync for VulkanBase{}
+
 impl VulkanBase{
     fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
         self.allocation_callbacks.as_ref()
+    }
+
+    pub fn create_semaphore(&self)->VkResult<vk::Semaphore>{
+        let semaphore_create_info=vk::SemaphoreCreateInfo{
+            ..Default::default()
+        };
+        unsafe{
+            self.device.create_semaphore(&semaphore_create_info,self.get_allocation_callbacks())
+        }
+    }
+
+    pub fn create_fence(&self,signaled:bool)->VkResult<vk::Fence>{
+        let fence_create_info=vk::FenceCreateInfo{
+            flags:if signaled{
+                vk::FenceCreateFlags::SIGNALED
+            }else{
+                vk::FenceCreateFlags::empty()
+            },
+            ..Default::default()
+        };
+        unsafe{
+            self.device.create_fence(&fence_create_info,self.get_allocation_callbacks())
+        }
+    }
+}
+impl Drop for VulkanBase{
+    fn drop(&mut self){
+        unsafe{
+            self.device.destroy_device(self.get_allocation_callbacks());
+
+            self.instance.destroy_instance(self.get_allocation_callbacks())
+        }
     }
 }
 
@@ -122,29 +157,50 @@ pub struct Object{
 }
 
 pub struct Queue{
+    vulkan:std::sync::Arc<VulkanBase>,
     queue:vk::Queue,
     family_index:u32,
-    command_pool:vk::CommandPool,
+    command_pool:std::rc::Rc<vk::CommandPool>,
     command_buffers:Vec<vk::CommandBuffer>,
 }
 impl Queue{
-    pub fn new_command_buffer(&mut self,device:&Device)->vk::CommandBuffer{
+    pub fn create_command_buffers(&mut self,count:u32)->std::ops::Range<usize>{
        let command_buffers_create_info=vk::CommandBufferAllocateInfo{
-            command_pool:self.command_pool,
+            command_pool:*self.command_pool,
             level:vk::CommandBufferLevel::PRIMARY,
-            command_buffer_count:1,
+            command_buffer_count:count,
             ..Default::default()
         };
 
-        let command_buffers=unsafe{
-            device.allocate_command_buffers(&command_buffers_create_info)
+        let mut command_buffers=unsafe{
+            self.vulkan.device.allocate_command_buffers(&command_buffers_create_info)
         }.unwrap();
 
-        let command_buffer=command_buffers[0];
+        let start=self.command_buffers.len();
+        self.command_buffers.append(&mut command_buffers);
+        let end=start+count as usize;
 
-        self.command_buffers.push(command_buffer);
-
-        command_buffer
+        start..end
+    }
+}
+impl Clone for Queue{
+    fn clone(&self)->Self{
+        Queue{
+            vulkan:self.vulkan.clone(),
+            queue:self.queue,
+            family_index:self.family_index,
+            command_pool:self.command_pool.clone(),
+            command_buffers:Vec::new(),
+        }
+    }
+}
+impl Drop for Queue{
+    fn drop(&mut self){
+        if std::rc::Rc::strong_count(&self.command_pool)==1{
+            unsafe{
+                self.vulkan.device.destroy_command_pool(*self.command_pool, self.vulkan.get_allocation_callbacks());
+            }
+        }
     }
 }
 
@@ -276,19 +332,18 @@ impl WindowManagerHandle{
 
 struct Manager{
     window_manager_handle:WindowManagerHandle,
-    open_windows:Vec<Window>,
+    open_windows:std::collections::HashMap<u32,Window>,
 
     next_window_id:u32,
 
     vulkan:std::sync::Arc<VulkanBase>,
 
-    painter:std::mem::ManuallyDrop<Painter>,
-    decoder:std::mem::ManuallyDrop<Decoder>,
+    painter:Painter,
+    decoder:Decoder,
 }
 impl Manager{
     pub fn new()->Self{
         let window_manager_handle=WindowManagerHandle::new();
-        let open_windows=Vec::new();
 
         let entry=unsafe{
             Entry::new().unwrap()
@@ -339,280 +394,168 @@ impl Manager{
         //the window will destroy itself at the end of this function
         let test_window=TestWindow::new(&window_manager_handle,&entry,&instance,temp_allocation_callbacks);
 
-        let (device,physical_device,present_queue,transfer_queue,graphics_queue)={
-            let device_layers:Vec<&str>=vec![
-            ];
-            let device_layer_names:Vec<*const i8>=device_layers.iter().map(|l| l.as_ptr() as *const i8).collect();
+        let device_layers:Vec<&str>=vec![
+        ];
+        let device_layer_names:Vec<*const i8>=device_layers.iter().map(|l| l.as_ptr() as *const i8).collect();
 
-            let device_extensions:Vec<&str>=vec![
-                "VK_KHR_swapchain\0",
-            ];
-            let device_extension_names:Vec<*const i8>=device_extensions.iter().map(|e| e.as_ptr() as *const i8).collect();
+        let device_extensions:Vec<&str>=vec![
+            "VK_KHR_swapchain\0",
+        ];
+        let device_extension_names:Vec<*const i8>=device_extensions.iter().map(|e| e.as_ptr() as *const i8).collect();
 
-            let mut present_queue=Queue{
-                queue:vk::Queue::null(),
-                family_index:0,
-                command_pool:vk::CommandPool::null(),
-                command_buffers:Vec::new(),
+        let mut present_queue_family_index=0;
+        let mut transfer_queue_family_index=0;
+        let mut graphics_queue_family_index=0;
+        
+        let mut queue_create_infos=Vec::with_capacity(3);
+
+        //find fit physical device
+        let physical_device:PhysicalDevice=*unsafe{
+            instance.enumerate_physical_devices()
+        }.unwrap().iter().find(|pd|{
+            present_queue_family_index=u32::MAX;
+            transfer_queue_family_index=u32::MAX;
+            graphics_queue_family_index=u32::MAX;
+
+            let _properties=unsafe{
+                instance.get_physical_device_properties(**pd)
             };
-            let mut transfer_queue=Queue{
-                queue:vk::Queue::null(),
-                family_index:0,
-                command_pool:vk::CommandPool::null(),
-                command_buffers:Vec::new(),
+            let _features=unsafe{
+                instance.get_physical_device_features(**pd)
             };
-            let mut graphics_queue=Queue{
-                queue:vk::Queue::null(),
-                family_index:0,
-                command_pool:vk::CommandPool::null(),
-                command_buffers:Vec::new(),
-            };
-            
-            let mut queue_create_infos=Vec::with_capacity(3);
 
-            //find fit physical device
-            let physical_device:PhysicalDevice=*unsafe{
-                instance.enumerate_physical_devices()
-            }.unwrap().iter().find(|pd|{
-                present_queue.family_index=u32::MAX;
-                transfer_queue.family_index=u32::MAX;
-                graphics_queue.family_index=u32::MAX;
-
-                let _properties=unsafe{
-                    instance.get_physical_device_properties(**pd)
-                };
-                let _features=unsafe{
-                    instance.get_physical_device_features(**pd)
-                };
-
-                //check if all extensions required are supported
-                let extension_properties=unsafe{
-                    instance.enumerate_device_extension_properties(**pd)
-                }.unwrap();
-                let mut extensions_supported=device_extension_names.iter().enumerate().map(
-                    |(i,e)|
-                    match extension_properties.iter().find(
-                        |p|
-                        {
-                            unsafe{
-                                libc::strcmp(*e,p.extension_name.as_ptr())==0
-                            }
-                        }
-                    ){
-                        Some(_)=>true,
-                        None=>{
-                            println!("extension {} unsupported",device_extensions[i]);
-                            false
-                        }
-                    }
-                );
-                if extensions_supported.find(|&e| !e).is_some(){
-                    return false;
-                }
-
-                let queue_family_properties=unsafe{
-                    instance.get_physical_device_queue_family_properties(**pd)
-                };
-
-                //if only one family is available, assume the worst: only a single queue that does everything
-                if queue_family_properties.len()==1{
-                    present_queue.family_index=0;
-                    transfer_queue.family_index=0;
-                    graphics_queue.family_index=0;
-                    queue_create_infos.push(vk::DeviceQueueCreateInfo{
-                        queue_family_index:0 as u32,
-                        queue_count:1,
-                        p_queue_priorities:std::ptr::null(),
-                        ..Default::default()
-                    });
-                }else{
-                    for (i,queue_family_property) in queue_family_properties.iter().enumerate(){
-                        if match &test_window.handle{
-                            #[cfg(target_os="windows")]
-                            TestWindowHandle::Windows{hwnd:_,win32_surface}=>{
-                                unsafe{
-                                    win32_surface.get_physical_device_win32_presentation_support(**pd,i as u32)
-                                }
-                            },
-                            #[cfg(target_os="linux")]
-                            TestWindowHandle::Xcb{connection,window,xcb_surface,visual}=>{
-                                unsafe{
-                                    xcb_surface.get_physical_device_xcb_presentation_support(**pd,i as u32,unsafe{
-                                        std::mem::transmute::<*mut libc::c_void,&mut libc::c_void>((*connection) as *mut libc::c_void)
-                                    },*visual)
-                                }
-                            },
-                            _=>unimplemented!()
-                        }{
-                            present_queue.family_index=i as u32;
-
-                            if let Some(qci)=queue_create_infos.iter_mut().find(|qci| qci.queue_family_index==(i as u32)){
-                                qci.queue_count+=1;
-                            }else{
-                                queue_create_infos.push(vk::DeviceQueueCreateInfo{
-                                    queue_family_index:i as u32,
-                                    queue_count:1,
-                                    p_queue_priorities:std::ptr::null(),
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                        
-                        if queue_family_property.queue_flags.contains(vk::QueueFlags::TRANSFER){
-                            transfer_queue.family_index=i as u32;
-
-                            if let Some(qci)=queue_create_infos.iter_mut().find(|qci| qci.queue_family_index==(i as u32)){
-                                qci.queue_count+=1;
-                            }else{
-                                queue_create_infos.push(vk::DeviceQueueCreateInfo{
-                                    queue_family_index:i as u32,
-                                    queue_count:1,
-                                    p_queue_priorities:std::ptr::null(),
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                        if queue_family_property.queue_flags.contains(vk::QueueFlags::GRAPHICS){
-                            graphics_queue.family_index=i as u32;
-
-                            if let Some(qci)=queue_create_infos.iter_mut().find(|qci| qci.queue_family_index==(i as u32)){
-                                qci.queue_count+=1;
-                            }else{
-                                queue_create_infos.push(vk::DeviceQueueCreateInfo{
-                                    queue_family_index:i as u32,
-                                    queue_count:1,
-                                    p_queue_priorities:std::ptr::null(),
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
-                }
-
-                //if one of the queue family indices is not set to something below the poison value, the physical device is unfit
-                let queue_family_indices=&[present_queue.family_index,transfer_queue.family_index,graphics_queue.family_index];
-                if queue_family_indices.iter().find(|qfi| (**qfi)==u32::MAX).is_some(){
-                    return false;
-                }
-
-                true
-            }).expect("no fit physical device found");
-
-            let queue_priorities:Vec<Vec<f32>>=queue_create_infos.iter().map(
-                |qci| vec![1.0;qci.queue_count as usize]
-            ).collect();
-            for (index,item) in queue_create_infos.iter_mut().enumerate(){
-                item.p_queue_priorities=queue_priorities[index].as_ptr();
-            }
-
-            let device_create_info=vk::DeviceCreateInfo{
-                queue_create_info_count:queue_create_infos.len() as u32,
-                p_queue_create_infos:queue_create_infos.as_ptr(),
-                enabled_layer_count:device_layer_names.len() as u32,
-                pp_enabled_layer_names:device_layer_names.as_ptr(),
-                enabled_extension_count:device_extension_names.len() as u32,
-                pp_enabled_extension_names:device_extension_names.as_ptr(),
-                ..Default::default()
-            };
-            let device=unsafe{
-                instance.create_device(physical_device,&device_create_info,temp_allocation_callbacks)
+            //check if all extensions required are supported
+            let extension_properties=unsafe{
+                instance.enumerate_device_extension_properties(**pd)
             }.unwrap();
-            
-            let mut queue_indices=std::collections::HashMap::new();
-            for qci in queue_create_infos.iter(){
-                queue_indices.insert(qci.queue_family_index,0);
+            let mut extensions_supported=device_extension_names.iter().enumerate().map(
+                |(i,e)|
+                match extension_properties.iter().find(
+                    |p|
+                    {
+                        unsafe{
+                            libc::strcmp(*e,p.extension_name.as_ptr())==0
+                        }
+                    }
+                ){
+                    Some(_)=>true,
+                    None=>{
+                        println!("extension {} unsupported",device_extensions[i]);
+                        false
+                    }
+                }
+            );
+            if extensions_supported.find(|&e| !e).is_some(){
+                return false;
             }
 
-            let command_pool_create_info=vk::CommandPoolCreateInfo{
-                flags:vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-                queue_family_index:present_queue.family_index,
-                ..Default::default()
+            let queue_family_properties=unsafe{
+                instance.get_physical_device_queue_family_properties(**pd)
             };
-            
-            let (present_queue,transfer_queue,graphics_queue)=if 
-                present_queue.family_index==0 &&
-                transfer_queue.family_index==0 &&
-                graphics_queue.family_index==0 &&
-                queue_create_infos[0].queue_count==1
-            {
-                let queue=match queue_indices.get_mut(&present_queue.family_index){
-                    Some(i)=>{
-                        *i+=1;
-                        unsafe{
-                            device.get_device_queue(present_queue.family_index,*i-1)
-                        }
-                    },
-                    None=>unreachable!()
-                };
-                let command_pool=unsafe{
-                    device.create_command_pool(&command_pool_create_info,temp_allocation_callbacks)
-                }.unwrap();
-                let present_queue=std::sync::Arc::<crate::Queue>::new(crate::Queue{
-                    queue,
-                    family_index:present_queue.family_index,
-                    command_pool,
-                    command_buffers:Vec::new(),
-                });
-                
-                let queue=match queue_indices.get_mut(&transfer_queue.family_index){
-                    Some(i)=>{
-                        *i+=1;
-                        unsafe{
-                            device.get_device_queue(transfer_queue.family_index,*i-1)
-                        }
-                    },
-                    None=>unreachable!()
-                };
-                let command_pool=unsafe{
-                    device.create_command_pool(&command_pool_create_info,temp_allocation_callbacks)
-                }.unwrap();
-                let transfer_queue=std::sync::Arc::<crate::Queue>::new(crate::Queue{
-                    queue,
-                    family_index:transfer_queue.family_index,
-                    command_pool,
-                    command_buffers:Vec::new(),
-                });
-                
-                let queue=match queue_indices.get_mut(&graphics_queue.family_index){
-                    Some(i)=>{
-                        *i+=1;
-                        unsafe{
-                            device.get_device_queue(graphics_queue.family_index,*i-1)
-                        }
-                    },
-                    None=>unreachable!()
-                };
-                let command_pool=unsafe{
-                    device.create_command_pool(&command_pool_create_info,temp_allocation_callbacks)
-                }.unwrap();
-                let graphics_queue=std::sync::Arc::<crate::Queue>::new(crate::Queue{
-                    queue,
-                    family_index:graphics_queue.family_index,
-                    command_pool,
-                    command_buffers:Vec::new(),
-                });
 
-                (present_queue,transfer_queue,graphics_queue)
+            //if only one family is available, assume the worst: only a single queue that does everything
+            if queue_family_properties.len()==1{
+                present_queue_family_index=0;
+                transfer_queue_family_index=0;
+                graphics_queue_family_index=0;
+                queue_create_infos.push(vk::DeviceQueueCreateInfo{
+                    queue_family_index:0 as u32,
+                    queue_count:1,
+                    p_queue_priorities:std::ptr::null(),
+                    ..Default::default()
+                });
             }else{
-                let queue=unsafe{
-                    device.get_device_queue(0,0)
-                };
+                for (i,queue_family_property) in queue_family_properties.iter().enumerate(){
+                    if match &test_window.handle{
+                        #[cfg(target_os="windows")]
+                        TestWindowHandle::Windows{hwnd:_,win32_surface}=>{
+                            unsafe{
+                                win32_surface.get_physical_device_win32_presentation_support(**pd,i as u32)
+                            }
+                        },
+                        #[cfg(target_os="linux")]
+                        TestWindowHandle::Xcb{connection,window,xcb_surface,visual}=>{
+                            unsafe{
+                                xcb_surface.get_physical_device_xcb_presentation_support(**pd,i as u32,unsafe{
+                                    std::mem::transmute::<*mut libc::c_void,&mut libc::c_void>((*connection) as *mut libc::c_void)
+                                },*visual)
+                            }
+                        },
+                        _=>unimplemented!()
+                    }{
+                        present_queue_family_index=i as u32;
 
-                let command_pool=unsafe{
-                    device.create_command_pool(&command_pool_create_info,temp_allocation_callbacks)
-                }.unwrap();
-                let queue=std::sync::Arc::<crate::Queue>::new(crate::Queue{
-                    queue,
-                    family_index:0,
-                    command_pool,
-                    command_buffers:Vec::new(),
-                });
+                        if let Some(qci)=queue_create_infos.iter_mut().find(|qci| qci.queue_family_index==(i as u32)){
+                            qci.queue_count+=1;
+                        }else{
+                            queue_create_infos.push(vk::DeviceQueueCreateInfo{
+                                queue_family_index:i as u32,
+                                queue_count:1,
+                                p_queue_priorities:std::ptr::null(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                    
+                    if queue_family_property.queue_flags.contains(vk::QueueFlags::TRANSFER){
+                        transfer_queue_family_index=i as u32;
 
-                (queue.clone(),queue.clone(),queue)
-            };
+                        if let Some(qci)=queue_create_infos.iter_mut().find(|qci| qci.queue_family_index==(i as u32)){
+                            qci.queue_count+=1;
+                        }else{
+                            queue_create_infos.push(vk::DeviceQueueCreateInfo{
+                                queue_family_index:i as u32,
+                                queue_count:1,
+                                p_queue_priorities:std::ptr::null(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                    if queue_family_property.queue_flags.contains(vk::QueueFlags::GRAPHICS){
+                        graphics_queue_family_index=i as u32;
 
-            (device,physical_device,present_queue,transfer_queue,graphics_queue)
+                        if let Some(qci)=queue_create_infos.iter_mut().find(|qci| qci.queue_family_index==(i as u32)){
+                            qci.queue_count+=1;
+                        }else{
+                            queue_create_infos.push(vk::DeviceQueueCreateInfo{
+                                queue_family_index:i as u32,
+                                queue_count:1,
+                                p_queue_priorities:std::ptr::null(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            }
+
+            //if one of the queue family indices is not set to something below the poison value, the physical device is unfit
+            let queue_family_indices=&[present_queue_family_index,transfer_queue_family_index,graphics_queue_family_index];
+            if queue_family_indices.iter().find(|qfi| (**qfi)==u32::MAX).is_some(){
+                return false;
+            }
+
+            true
+        }).expect("no fit physical device found");
+
+        let queue_priorities:Vec<Vec<f32>>=queue_create_infos.iter().map(
+            |qci| vec![1.0;qci.queue_count as usize]
+        ).collect();
+        for (index,item) in queue_create_infos.iter_mut().enumerate(){
+            item.p_queue_priorities=queue_priorities[index].as_ptr();
+        }
+
+        let device_create_info=vk::DeviceCreateInfo{
+            queue_create_info_count:queue_create_infos.len() as u32,
+            p_queue_create_infos:queue_create_infos.as_ptr(),
+            enabled_layer_count:device_layer_names.len() as u32,
+            pp_enabled_layer_names:device_layer_names.as_ptr(),
+            enabled_extension_count:device_extension_names.len() as u32,
+            pp_enabled_extension_names:device_extension_names.as_ptr(),
+            ..Default::default()
         };
+        let device=unsafe{
+            instance.create_device(physical_device,&device_create_info,temp_allocation_callbacks)
+        }.unwrap();
 
         let vulkan=std::sync::Arc::new(VulkanBase{
             entry,
@@ -623,45 +566,132 @@ impl Manager{
             physical_device,
             device:device.clone(),
         });
+        
+        let mut queue_indices=std::collections::HashMap::new();
+        for qci in queue_create_infos.iter(){
+            queue_indices.insert(qci.queue_family_index,0);
+        }
+        
+        let present_queue;
+        let transfer_queue;
+        let graphics_queue;
+        if 
+            present_queue_family_index==0 &&
+            transfer_queue_family_index==0 &&
+            graphics_queue_family_index==0 &&
+            queue_create_infos[0].queue_count==1
+        {
+            let queue=match queue_indices.get_mut(&present_queue_family_index){
+                Some(i)=>{
+                    *i+=1;
+                    unsafe{
+                        device.get_device_queue(present_queue_family_index,*i-1)
+                    }
+                },
+                None=>unreachable!()
+            };
 
-        //Painter related stuff
-        let painter=std::mem::ManuallyDrop::new(Painter::new(&vulkan,&test_window,&graphics_queue,&present_queue));
+            let command_pool_create_info=vk::CommandPoolCreateInfo{
+                flags:vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                queue_family_index:present_queue_family_index,
+                ..Default::default()
+            };
+            let command_pool=unsafe{
+                device.create_command_pool(&command_pool_create_info,temp_allocation_callbacks)
+            }.unwrap();
+            present_queue=crate::Queue{
+                vulkan:vulkan.clone(),
+                queue,
+                family_index:present_queue_family_index,
+                command_pool:std::rc::Rc::new(command_pool),
+                command_buffers:Vec::new(),
+            };
+            
+            let command_pool_create_info=vk::CommandPoolCreateInfo{
+                flags:vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                queue_family_index:transfer_queue_family_index,
+                ..Default::default()
+            };
+            let queue=match queue_indices.get_mut(&transfer_queue_family_index){
+                Some(i)=>{
+                    *i+=1;
+                    unsafe{
+                        device.get_device_queue(transfer_queue_family_index,*i-1)
+                    }
+                },
+                None=>unreachable!()
+            };
+            let command_pool=unsafe{
+                device.create_command_pool(&command_pool_create_info,temp_allocation_callbacks)
+            }.unwrap();
+            transfer_queue=crate::Queue{
+                vulkan:vulkan.clone(),
+                queue,
+                family_index:transfer_queue_family_index,
+                command_pool:std::rc::Rc::new(command_pool),
+                command_buffers:Vec::new(),
+            };
+            
+            let command_pool_create_info=vk::CommandPoolCreateInfo{
+                flags:vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                queue_family_index:graphics_queue_family_index,
+                ..Default::default()
+            };
+            let queue=match queue_indices.get_mut(&graphics_queue_family_index){
+                Some(i)=>{
+                    *i+=1;
+                    unsafe{
+                        device.get_device_queue(graphics_queue_family_index,*i-1)
+                    }
+                },
+                None=>unreachable!()
+            };
+            let command_pool=unsafe{
+                device.create_command_pool(&command_pool_create_info,temp_allocation_callbacks)
+            }.unwrap();
+            graphics_queue=crate::Queue{
+                vulkan:vulkan.clone(),
+                queue,
+                family_index:graphics_queue_family_index,
+                command_pool:std::rc::Rc::new(command_pool),
+                command_buffers:Vec::new(),
+            };
+        }else{
+            let queue=unsafe{
+                device.get_device_queue(0,0)
+            };
 
-        let decoder=std::mem::ManuallyDrop::new(Decoder::new(&vulkan,&transfer_queue));
+            let command_pool_create_info=vk::CommandPoolCreateInfo{
+                flags:vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                queue_family_index:0,
+                ..Default::default()
+            };
+            let command_pool=unsafe{
+                device.create_command_pool(&command_pool_create_info,temp_allocation_callbacks)
+            }.unwrap();
+            let queue=crate::Queue{
+                vulkan:vulkan.clone(),
+                queue,
+                family_index:0,
+                command_pool:std::rc::Rc::new(command_pool),
+                command_buffers:Vec::new(),
+            };
+
+            transfer_queue=queue.clone();
+            graphics_queue=queue.clone();
+            present_queue=queue.clone();
+        };
 
         Self{
             window_manager_handle,
             next_window_id:0,
-            open_windows,
+            open_windows:std::collections::HashMap::new(),
 
-            vulkan,
+            vulkan:vulkan.clone(),
 
-            painter,
+            painter:Painter::new(&vulkan,&test_window,graphics_queue,present_queue),
 
-            decoder,
-        }
-    }
-
-    pub fn create_semaphore(&self)->VkResult<vk::Semaphore>{
-        let semaphore_create_info=vk::SemaphoreCreateInfo{
-            ..Default::default()
-        };
-        unsafe{
-            self.vulkan.device.create_semaphore(&semaphore_create_info,self.vulkan.get_allocation_callbacks())
-        }
-    }
-
-    pub fn create_fence(&self,signaled:bool)->VkResult<vk::Fence>{
-        let fence_create_info=vk::FenceCreateInfo{
-            flags:if signaled{
-                vk::FenceCreateFlags::SIGNALED
-            }else{
-                vk::FenceCreateFlags::empty()
-            },
-            ..Default::default()
-        };
-        unsafe{
-            self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
+            decoder:Decoder::new(&vulkan,transfer_queue),
         }
     }
 
@@ -886,28 +916,17 @@ impl Manager{
             handle,
             surface,
         };
-        self.open_windows.push(window);
+
+        self.painter.add_window(&window);
+
+        self.open_windows.insert(window.id,window);
     }
-    #[cfg(disabled)]
-    fn destroy_window(&mut self,open_window_index:usize){
-        for framebuffer in self.open_windows[open_window_index].swapchain_image_framebuffers.iter(){
-            unsafe{
-                self.device.destroy_framebuffer(*framebuffer, self.get_allocation_callbacks());
-            }
-        }
-        for image_view in self.open_windows[open_window_index].swapchain_image_views.iter(){
-            unsafe{
-                self.device.destroy_image_view(*image_view, self.get_allocation_callbacks());
-            }
-        }
-        unsafe{
-            self.device.destroy_semaphore(self.open_windows[open_window_index].image_available, self.get_allocation_callbacks());
-            self.device.destroy_semaphore(self.open_windows[open_window_index].image_transferable, self.get_allocation_callbacks());
-            self.device.destroy_semaphore(self.open_windows[open_window_index].image_presentable, self.get_allocation_callbacks());
-            self.open_windows[open_window_index].swapchain.destroy_swapchain(self.open_windows[open_window_index].swapchain_handle,self.get_allocation_callbacks());
-            self.surface.destroy_surface(self.open_windows[open_window_index].surface,self.get_allocation_callbacks())
-        };
-        match self.open_windows[open_window_index].handle{
+
+    fn destroy_window(&mut self,window_id:u32){
+        let window=self.open_windows.remove(&window_id).unwrap();
+        self.painter.remove_window(window.id);
+
+        match window.handle{
             #[cfg(target_os="windows")]
             WindowHandle::Windows{hwnd,..}=>{
                 unsafe{
@@ -998,6 +1017,12 @@ impl Manager{
             _=>panic!("unsupported")
         }
 
+        self.painter.draw();
+
+        unsafe{
+            self.vulkan.device.device_wait_idle()
+        }.unwrap();
+
         ControlFlow::Continue
     }
 
@@ -1013,37 +1038,20 @@ impl Manager{
         }
     }
 }
-/*
 impl Drop for Manager{
     fn drop(&mut self){
         //finish all gpu interaction, which may include window system interaction before window and vulkan resourse destruction
         unsafe{
-            self.device.device_wait_idle()
+            self.vulkan.device.device_wait_idle()
         }.unwrap();
 
-        unsafe{
-            std::mem::ManuallyDrop::drop(&mut self.painter);
-            std::mem::ManuallyDrop::drop(&mut self.decoder);
+        for id in self.open_windows.iter().map(|(id,_)| *id).collect::<Vec<u32>>().iter(){
+            self.destroy_window(*id);
         }
-
-        for open_window_index in 0..self.open_windows.len(){
-            self.destroy_window(open_window_index);
-        }
-
-        unsafe{
-            self.device.destroy_fence(self.frame_sync_fence, self.get_allocation_callbacks());
-
-            self.device.destroy_command_pool(self.present_queue_command_pool, self.get_allocation_callbacks());
-
-            self.device.destroy_device(self.get_allocation_callbacks());
-
-            self.instance.destroy_instance(self.get_allocation_callbacks())
-        };
 
         self.window_manager_handle.destroy();
     }
 }
-*/
 
 fn main() {
     let mut manager=Manager::new();

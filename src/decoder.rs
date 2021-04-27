@@ -137,7 +137,7 @@ pub struct Decoder{
 
     pub device_memory_properties:vk::PhysicalDeviceMemoryProperties,
 
-    pub transfer_queue:std::sync::Arc<crate::Queue>,
+    pub transfer_queue:crate::Queue,
 
     pub staging_buffers:Vec<StagingBuffer>,
 
@@ -146,7 +146,7 @@ pub struct Decoder{
     pub textures:std::collections::HashMap<&'static str,std::sync::Arc<Image>>,
 }
 impl Decoder{
-    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>,transfer_queue:&std::sync::Arc<crate::Queue>)->Self{
+    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>,transfer_queue:crate::Queue)->Self{
         let device_memory_properties=unsafe{
             vulkan.instance.get_physical_device_memory_properties(vulkan.physical_device)
         };
@@ -156,7 +156,7 @@ impl Decoder{
 
             device_memory_properties,
 
-            transfer_queue:transfer_queue.clone(),
+            transfer_queue,
 
             staging_buffers:Vec::new(),
 

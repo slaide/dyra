@@ -86,6 +86,8 @@ pub struct ShaderData{
     pub sampler:vk::Sampler,
 }
 pub struct RenderPass{
+    pub vulkan:std::sync::Arc<crate::VulkanBase>,
+
     pub render_pass:vk::RenderPass,
 
     //color information
@@ -102,8 +104,10 @@ pub struct RenderPass{
     pub rendering_done:vk::Semaphore,
 }
 impl RenderPass{
-    pub fn new()->Self{
+    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>)->Self{
         Self{
+            vulkan:vulkan.clone(),
+
             render_pass:vk::RenderPass::null(),
 
             color_image:vk::Image::null(),
@@ -140,7 +144,7 @@ pub struct Painter{
 
     pub frame_sync_fence:vk::Fence,
 
-    pub present_queue:std::sync::Arc<crate::Queue>,
+    pub present_queue:crate::Queue,
 
     pub present_render_pass:vk::RenderPass,
 
@@ -148,15 +152,16 @@ pub struct Painter{
 
     pub window_attachments:std::collections::HashMap<u32,WindowAttachments>,
 
-    pub graphics_queue:std::sync::Arc<crate::Queue>,
+    pub graphics_queue:crate::Queue,
 
     pub render_pass_2d:RenderPass,
     pub render_pass_3d:RenderPass,
 }
-/*
 impl Drop for Painter{
     fn drop(&mut self){
         unsafe{
+            self.vulkan.device.destroy_fence(self.frame_sync_fence,self.vulkan.get_allocation_callbacks());
+            /*
             self.device.destroy_sampler(self.sampler,self.get_allocation_callbacks());
 
             self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, self.get_allocation_callbacks());
@@ -172,17 +177,13 @@ impl Drop for Painter{
             }
 
             self.device.destroy_render_pass(self.render_pass, self.get_allocation_callbacks());
-
-            self.device.destroy_semaphore(self.rendering_done,self.get_allocation_callbacks());
-
-            self.device.destroy_command_pool(self.graphics_queue_command_pool, self.get_allocation_callbacks());
+            */
         }
     }
 }
-*/
 
 impl Painter{
-    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>,test_window:&crate::TestWindow,graphics_queue:&std::sync::Arc<crate::Queue>,present_queue:&std::sync::Arc<crate::Queue>)->Self{
+    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>,test_window:&crate::TestWindow,graphics_queue:crate::Queue,present_queue:crate::Queue)->Self{
         let surface=extensions::khr::Surface::new(&vulkan.entry,&vulkan.instance);
         //used to wait for last frame to be finished (and synchronized with max framerate) before new frame starts
         //must be signaled to simulate last frame being finished on first frame
@@ -215,6 +216,11 @@ impl Painter{
             }
         }
 
+        let mut present_queue=present_queue;
+        //ensure existence of at least 2 command buffers
+        let range=present_queue.create_command_buffers(2);
+        println!("created command buffers in this range: {:?}",range);
+
         Self{
             vulkan:vulkan.clone(),
 
@@ -224,19 +230,209 @@ impl Painter{
 
             swapchain_surface_format,
 
-            present_queue:present_queue.clone(),
+            present_queue,
             present_render_pass:vk::RenderPass::null(),
             window_attachments:std::collections::HashMap::new(),
 
-            graphics_queue:graphics_queue.clone(),
+            graphics_queue,
 
-            render_pass_2d:RenderPass::new(),
-            render_pass_3d:RenderPass::new(),
+            render_pass_2d:RenderPass::new(&vulkan),
+            render_pass_3d:RenderPass::new(&vulkan),
         }
     }
 
-    #[cfg(disabled)]
-    pub fn draw(&mut self,framebuffer:vk::Framebuffer,window_extent:vk::Extent2D,objects:&Vec<Object>,done:vk::Semaphore){
+    //wait for fence on start?
+    //signal fence when done?
+    pub fn draw(&mut self)->crate::ControlFlow{
+        let window_ids=self.window_attachments.keys();
+        for id in window_ids{
+            let window_attachment=self.window_attachments.get(id).unwrap();
+            //for each renderpass (2d and 3d):
+                //draw camera perspective to framebuffer
+            //acquire swapchain image
+            
+            //acquire next swapchain image for drawing and presenting
+            let (image_index,suboptimal)=unsafe{
+                window_attachment.swapchain.acquire_next_image(window_attachment.swapchain_handle, u64::MAX, window_attachment.image_available, vk::Fence::null())
+            }.unwrap();
+
+            //this means the swapchain should be recreated, but we dont care much right now
+            if suboptimal{
+                println!("swapchain image acquired is suboptimal");
+                return crate::ControlFlow::Stop;
+            }
+
+            let swapchain_image=window_attachment.swapchain_images[image_index as usize];
+            //hand image over to graphics queue
+            {
+                let command_buffer=self.present_queue.command_buffers[0];
+                //begin transition command buffer 1
+                let present_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
+                    flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.begin_command_buffer(command_buffer,&present_queue_command_buffer_begin_info)
+                }.unwrap();
+                let subresource_range=vk::ImageSubresourceRange{
+                    aspect_mask:vk::ImageAspectFlags::COLOR,
+                    base_mip_level:0,
+                    level_count:1,
+                    base_array_layer:0,
+                    layer_count:1,
+                };
+                let image_memory_barrier=vk::ImageMemoryBarrier{
+                    src_access_mask:vk::AccessFlags::MEMORY_READ,
+                    dst_access_mask:vk::AccessFlags::MEMORY_READ,
+                    old_layout:vk::ImageLayout::UNDEFINED,
+                    new_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    src_queue_family_index:self.present_queue.family_index,
+                    dst_queue_family_index:self.present_queue.family_index,
+                    image:swapchain_image,
+                    subresource_range,
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE, 
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, 
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[image_memory_barrier]
+                    )
+                };
+                //end transition command buffer 1
+                unsafe{
+                    self.vulkan.device.end_command_buffer(command_buffer)
+                }.unwrap();
+                //submit transition command buffer 1
+                let wait_semaphores_1=vec![
+                    window_attachment.image_available,
+                ];
+                let dst_stage_masks_1=vec![
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                ];
+                let command_buffers_1=vec![
+                    command_buffer
+                ];
+                let signal_semaphores_1=vec![
+                    window_attachment.image_transferable
+                ];
+                let submit_info_1=vk::SubmitInfo{
+                    wait_semaphore_count:wait_semaphores_1.len() as u32,
+                    p_wait_semaphores:wait_semaphores_1.as_ptr(),
+                    p_wait_dst_stage_mask:dst_stage_masks_1.as_ptr(),
+                    command_buffer_count:command_buffers_1.len() as u32,
+                    p_command_buffers:command_buffers_1.as_ptr(),
+                    signal_semaphore_count:signal_semaphores_1.len() as u32,
+                    p_signal_semaphores:signal_semaphores_1.as_ptr(),
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],vk::Fence::null())
+                }.unwrap();
+            }
+            //copy 3d image color attachment to swapchain image
+            //copy 2d image color attachment to swapchain image
+            //return swapchain image to present queue
+            {
+                let command_buffer=self.present_queue.command_buffers[1];
+                //begin transition command buffer 1
+                let present_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
+                    flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.begin_command_buffer(command_buffer,&present_queue_command_buffer_begin_info)
+                }.unwrap();
+                let subresource_range=vk::ImageSubresourceRange{
+                    aspect_mask:vk::ImageAspectFlags::COLOR,
+                    base_mip_level:0,
+                    level_count:1,
+                    base_array_layer:0,
+                    layer_count:1,
+                };
+                let image_memory_barrier=vk::ImageMemoryBarrier{
+                    src_access_mask:vk::AccessFlags::MEMORY_READ,
+                    dst_access_mask:vk::AccessFlags::MEMORY_READ,
+                    old_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout:vk::ImageLayout::PRESENT_SRC_KHR,
+                    src_queue_family_index:self.present_queue.family_index,
+                    dst_queue_family_index:self.present_queue.family_index,
+                    image:swapchain_image,
+                    subresource_range,
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE, 
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, 
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[image_memory_barrier]
+                    )
+                };
+                //end transition command buffer 1
+                unsafe{
+                    self.vulkan.device.end_command_buffer(command_buffer)
+                }.unwrap();
+                //submit transition command buffer 1
+                let wait_semaphores_1=vec![
+                    window_attachment.image_transferable,
+                ];
+                let dst_stage_masks_1=vec![
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                ];
+                let command_buffers_1=vec![
+                    command_buffer
+                ];
+                let signal_semaphores_1=vec![
+                    window_attachment.image_presentable
+                ];
+                let submit_info_1=vk::SubmitInfo{
+                    wait_semaphore_count:wait_semaphores_1.len() as u32,
+                    p_wait_semaphores:wait_semaphores_1.as_ptr(),
+                    p_wait_dst_stage_mask:dst_stage_masks_1.as_ptr(),
+                    command_buffer_count:command_buffers_1.len() as u32,
+                    p_command_buffers:command_buffers_1.as_ptr(),
+                    signal_semaphore_count:signal_semaphores_1.len() as u32,
+                    p_signal_semaphores:signal_semaphores_1.as_ptr(),
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],vk::Fence::null())
+                }.unwrap();
+            }
+            //present swapchain image
+            {
+                let present_wait_semaphores=vec![
+                    window_attachment.image_presentable,
+                ];
+                let mut present_results=vec![
+                    vk::Result::SUCCESS,
+                ];
+                let present_info=vk::PresentInfoKHR{
+                    wait_semaphore_count:present_wait_semaphores.len() as u32,
+                    p_wait_semaphores:present_wait_semaphores.as_ptr(),
+                    swapchain_count:1,
+                    p_swapchains:&window_attachment.swapchain_handle,
+                    p_image_indices:&image_index,
+                    p_results:present_results.as_mut_ptr(),
+                    ..Default::default()
+                };
+                unsafe{
+                    window_attachment.swapchain.queue_present(self.present_queue.queue,&present_info)
+                }.unwrap();
+            }
+        }
+
+        return crate::ControlFlow::Continue;
+
+
         //record graphics command buffer
         //begin
         /*
@@ -254,6 +450,8 @@ impl Painter{
             self.device.cmd_pipeline_barrier(self.graphics_queue_command_buffers[0],vk::PipelineStageFlags::TOP_OF_PIPE,vk::PipelineStageFlags::TRANSFER,vk::DependencyFlags::empty(),&[],&[],&[])
         };
         */
+
+        /*
 
         //render quad
         //begin render pass
@@ -423,6 +621,8 @@ impl Painter{
         unsafe{
             self.device.queue_submit(self.graphics_queue,&[submit_info_graphics],vk::Fence::null())
         }.unwrap();
+
+        */
     }
 
     #[cfg(disabled)]
@@ -436,6 +636,8 @@ impl Painter{
 
         {
             //acquire next swapchain image for drawing and presenting
+            //copied
+            /*
             let (image_index,suboptimal)=unsafe{
                 self.open_windows[0].swapchain.acquire_next_image(self.open_windows[0].swapchain_handle, u64::MAX, self.open_windows[0].image_available, vk::Fence::null())
             }.unwrap();
@@ -445,8 +647,9 @@ impl Painter{
                 println!("swapchain image acquired is suboptimal");
                 return ControlFlow::Stop;
             }
-
             let swapchain_image=self.open_windows[0].swapchain_images[image_index as usize];
+
+            */
 
             //transfer swapchain image ownership to graphics queue for drawing
             {
@@ -648,6 +851,8 @@ impl Painter{
                 }.unwrap();
             }
 
+            //copied
+            /*
             //present swapchain image
             {
                 let present_wait_semaphores=vec![
@@ -669,47 +874,25 @@ impl Painter{
                     self.open_windows[0].swapchain.queue_present(self.present_queue,&present_info)
                 }.unwrap();
             }
+            */
         }   
     }
-
-    pub fn create_semaphore(&self)->VkResult<vk::Semaphore>{
-        let semaphore_create_info=vk::SemaphoreCreateInfo{
-            ..Default::default()
-        };
-        unsafe{
-            self.vulkan.device.create_semaphore(&semaphore_create_info,self.vulkan.get_allocation_callbacks())
-        }
-    }
-
-    pub fn create_fence(&self,signaled:bool)->VkResult<vk::Fence>{
-        let fence_create_info=vk::FenceCreateInfo{
-            flags:if signaled{
-                vk::FenceCreateFlags::SIGNALED
-            }else{
-                vk::FenceCreateFlags::empty()
-            },
-            ..Default::default()
-        };
-        unsafe{
-            self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
-        }
-    }
-
-    pub fn add_window(&mut self,surface:&ash::extensions::khr::Surface,window:&crate::Window){
+    
+    pub fn add_window(&mut self,window:&crate::Window){
         //vulkan spec states this must be done
         if unsafe{
-            !surface.get_physical_device_surface_support(self.vulkan.physical_device, self.present_queue.family_index, window.surface).unwrap()
+            !self.surface.get_physical_device_surface_support(self.vulkan.physical_device, self.present_queue.family_index, window.surface).unwrap()
         }{
             panic!("new surface does not support presentation like the temporary ones");
         }
 
         //create swapchain
-        let image_available=self.create_semaphore().unwrap();
-        let image_transferable=self.create_semaphore().unwrap();
-        let image_presentable=self.create_semaphore().unwrap();
+        let image_available=self.vulkan.create_semaphore().unwrap();
+        let image_transferable=self.vulkan.create_semaphore().unwrap();
+        let image_presentable=self.vulkan.create_semaphore().unwrap();
 
         let surface_capabilities=unsafe{
-            surface.get_physical_device_surface_capabilities(self.vulkan.physical_device, window.surface)
+            self.surface.get_physical_device_surface_capabilities(self.vulkan.physical_device, window.surface)
         }.unwrap();
 
         let mut image_count:u32=surface_capabilities.min_image_count+1;
@@ -718,7 +901,7 @@ impl Painter{
         }
 
         let surface_formats=unsafe{
-            surface.get_physical_device_surface_formats(self.vulkan.physical_device, window.surface)
+            self.surface.get_physical_device_surface_formats(self.vulkan.physical_device, window.surface)
         }.unwrap();
         //use first available format, but check for two 'better' alternatives
         let mut surface_format=surface_formats[0];
@@ -771,7 +954,7 @@ impl Painter{
         };
 
         let surface_present_modes=unsafe{
-            surface.get_physical_device_surface_present_modes(self.vulkan.physical_device, window.surface)
+            self.surface.get_physical_device_surface_present_modes(self.vulkan.physical_device, window.surface)
         }.unwrap();
         let swapchain_surface_present_mode=if surface_present_modes.contains(&vk::PresentModeKHR::MAILBOX){
             vk::PresentModeKHR::MAILBOX
@@ -873,5 +1056,30 @@ impl Painter{
         };
 
         self.window_attachments.insert(window.id,window_attachment);
+    }
+
+    pub fn remove_window(&mut self, window_id:u32){
+        let window_attachment=self.window_attachments.remove(&window_id).unwrap();
+
+        for framebuffer in window_attachment.swapchain_image_framebuffers.iter(){
+            unsafe{
+                self.vulkan.device.destroy_framebuffer(*framebuffer, self.vulkan.get_allocation_callbacks());
+            }
+        }
+        for image_view in window_attachment.swapchain_image_views.iter(){
+            unsafe{
+                self.vulkan.device.destroy_image_view(*image_view, self.vulkan.get_allocation_callbacks());
+            }
+        }
+        unsafe{
+            self.vulkan.device.destroy_semaphore(window_attachment.image_available, self.vulkan.get_allocation_callbacks());
+            self.vulkan.device.destroy_semaphore(window_attachment.image_transferable, self.vulkan.get_allocation_callbacks());
+            self.vulkan.device.destroy_semaphore(window_attachment.image_presentable, self.vulkan.get_allocation_callbacks());
+            window_attachment.swapchain.destroy_swapchain(
+                window_attachment.swapchain_handle,
+                self.vulkan.get_allocation_callbacks()
+            );
+            self.surface.destroy_surface(window_attachment.surface,self.vulkan.get_allocation_callbacks())
+        };
     }
 }
