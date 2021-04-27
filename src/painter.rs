@@ -182,9 +182,59 @@ impl Drop for Painter{
 */
 
 impl Painter{
-    fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
-        self.vulkan.allocation_callbacks.as_ref()
+    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>,test_window:&crate::TestWindow,graphics_queue:&std::sync::Arc<crate::Queue>,present_queue:&std::sync::Arc<crate::Queue>)->Self{
+        let surface=extensions::khr::Surface::new(&vulkan.entry,&vulkan.instance);
+        //used to wait for last frame to be finished (and synchronized with max framerate) before new frame starts
+        //must be signaled to simulate last frame being finished on first frame
+        let fence_create_info=vk::FenceCreateInfo{
+            flags:vk::FenceCreateFlags::SIGNALED,
+            ..Default::default()
+        };
+        let frame_sync_fence=unsafe{
+            vulkan.device.create_fence(&fence_create_info,vulkan.get_allocation_callbacks())
+        }.unwrap();
+        
+        //create render pass for simple rendering operations
+        let surface_formats=unsafe{
+            surface.get_physical_device_surface_formats(vulkan.physical_device, test_window.platform_surface)
+        }.unwrap();
+        //use first available format, but check for two 'better' alternatives
+        let mut swapchain_surface_format=surface_formats[0];
+        //if the only supported format is 'undefined', there is no preferred format for the surface
+        //then use 'most widely used' format
+        if surface_formats.len()==1 && swapchain_surface_format.format==vk::Format::UNDEFINED{
+            swapchain_surface_format=vk::SurfaceFormatKHR{
+                format:vk::Format::R8G8B8A8_UNORM,
+                color_space:vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            };
+        }else{
+            for format in surface_formats.iter(){
+                if format.format==vk::Format::R8G8B8A8_UNORM{
+                    swapchain_surface_format=*format;
+                }
+            }
+        }
+
+        Self{
+            vulkan:vulkan.clone(),
+
+            surface,
+
+            frame_sync_fence,
+
+            swapchain_surface_format,
+
+            present_queue:present_queue.clone(),
+            present_render_pass:vk::RenderPass::null(),
+            window_attachments:std::collections::HashMap::new(),
+
+            graphics_queue:graphics_queue.clone(),
+
+            render_pass_2d:RenderPass::new(),
+            render_pass_3d:RenderPass::new(),
+        }
     }
+
     #[cfg(disabled)]
     pub fn draw(&mut self,framebuffer:vk::Framebuffer,window_extent:vk::Extent2D,objects:&Vec<Object>,done:vk::Semaphore){
         //record graphics command buffer
@@ -627,7 +677,7 @@ impl Painter{
             ..Default::default()
         };
         unsafe{
-            self.vulkan.device.create_semaphore(&semaphore_create_info,self.get_allocation_callbacks())
+            self.vulkan.device.create_semaphore(&semaphore_create_info,self.vulkan.get_allocation_callbacks())
         }
     }
 
@@ -641,7 +691,7 @@ impl Painter{
             ..Default::default()
         };
         unsafe{
-            self.vulkan.device.create_fence(&fence_create_info,self.get_allocation_callbacks())
+            self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
         }
     }
 
@@ -752,7 +802,7 @@ impl Painter{
         };
         let swapchain=extensions::khr::Swapchain::new(&self.vulkan.instance,&self.vulkan.device);
         let swapchain_handle=unsafe{
-            swapchain.create_swapchain(&swapchain_create_info, self.get_allocation_callbacks())
+            swapchain.create_swapchain(&swapchain_create_info, self.vulkan.get_allocation_callbacks())
         }.unwrap();
 
         //images may only be created when this function is valled, so presenting an image index before
@@ -785,7 +835,7 @@ impl Painter{
                 ..Default::default()
             };
             unsafe{
-                self.vulkan.device.create_image_view(&image_view_create_info, self.get_allocation_callbacks())
+                self.vulkan.device.create_image_view(&image_view_create_info, self.vulkan.get_allocation_callbacks())
             }.unwrap()
         }).collect();
 

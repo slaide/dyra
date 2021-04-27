@@ -145,12 +145,27 @@ pub struct Decoder{
 
     pub textures:std::collections::HashMap<&'static str,std::sync::Arc<Image>>,
 }
-/*
 impl Decoder{
-    pub fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
-        self.allocation_callbacks.as_ref()
+    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>,transfer_queue:&std::sync::Arc<crate::Queue>)->Self{
+        let device_memory_properties=unsafe{
+            vulkan.instance.get_physical_device_memory_properties(vulkan.physical_device)
+        };
+        
+        Self{
+            vulkan:vulkan.clone(),
+
+            device_memory_properties,
+
+            transfer_queue:transfer_queue.clone(),
+
+            staging_buffers:Vec::new(),
+
+            meshes:std::collections::HashMap::new(),
+            textures:std::collections::HashMap::new(),
+        }
     }
 
+    #[cfg(disabled)]
     pub fn get_mesh(&mut self,name:&'static str,command_buffer:vk::CommandBuffer)->std::sync::Arc<Mesh>{
         if let Some(mesh)=self.meshes.get(name){
             return mesh.clone();
@@ -207,7 +222,7 @@ impl Decoder{
             let default_vt_v=0.0;
             let default_vt_w=0.0;
 
-            for line in {
+            for line in lines{
                 println!("{}",line);
             }
 
@@ -446,7 +461,7 @@ impl Decoder{
         mesh
     }
 
-    /*
+    #[cfg(disabled)]
     pub fn new_staging(&mut self,size:u64)->IntegratedBuffer{
         let buffer_create_info=vk::BufferCreateInfo{
             size:size,
@@ -495,8 +510,8 @@ impl Decoder{
             memory,
         }
     }
-    */
 
+    #[cfg(disabled)]
     pub fn get_texture(&mut self,filename:&'static str,command_buffer:vk::CommandBuffer)->std::sync::Arc<Image>{
         //return cached texture if present
         if let Some(texture)=self.textures.get(filename){
@@ -710,6 +725,8 @@ impl Decoder{
         image
     }
 }
+
+#[cfg(disabled)]
 impl Drop for Decoder{
     fn drop(&mut self){
         for(_name,texture) in self.textures.iter(){
@@ -736,4 +753,3 @@ impl Drop for Decoder{
 
     }
 }
-*/

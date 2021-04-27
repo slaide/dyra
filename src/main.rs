@@ -110,6 +110,11 @@ pub struct VulkanBase{
     physical_device:PhysicalDevice,
     device:Device,
 }
+impl VulkanBase{
+    fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
+        self.allocation_callbacks.as_ref()
+    }
+}
 
 pub struct Object{
     pub mesh:std::sync::Arc<Mesh>,
@@ -281,10 +286,6 @@ struct Manager{
     decoder:std::mem::ManuallyDrop<Decoder>,
 }
 impl Manager{
-    fn get_allocation_callbacks(&self)->Option<&vk::AllocationCallbacks>{
-        self.vulkan.allocation_callbacks.as_ref()
-    }
-
     pub fn new()->Self{
         let window_manager_handle=WindowManagerHandle::new();
         let open_windows=Vec::new();
@@ -613,42 +614,6 @@ impl Manager{
             (device,physical_device,present_queue,transfer_queue,graphics_queue)
         };
 
-        let surface=extensions::khr::Surface::new(&entry,&instance);
-        //used to wait for last frame to be finished (and synchronized with max framerate) before new frame starts
-        //must be signaled to simulate last frame being finished on first frame
-        let fence_create_info=vk::FenceCreateInfo{
-            flags:vk::FenceCreateFlags::SIGNALED,
-            ..Default::default()
-        };
-        let frame_sync_fence=unsafe{
-            device.create_fence(&fence_create_info,temp_allocation_callbacks)
-        }.unwrap();
-        
-        //create render pass for simple rendering operations
-        let surface_formats=unsafe{
-            surface.get_physical_device_surface_formats(physical_device, test_window.platform_surface)
-        }.unwrap();
-        //use first available format, but check for two 'better' alternatives
-        let mut swapchain_surface_format=surface_formats[0];
-        //if the only supported format is 'undefined', there is no preferred format for the surface
-        //then use 'most widely used' format
-        if surface_formats.len()==1 && swapchain_surface_format.format==vk::Format::UNDEFINED{
-            swapchain_surface_format=vk::SurfaceFormatKHR{
-                format:vk::Format::R8G8B8A8_UNORM,
-                color_space:vk::ColorSpaceKHR::SRGB_NONLINEAR,
-            };
-        }else{
-            for format in surface_formats.iter(){
-                if format.format==vk::Format::R8G8B8A8_UNORM{
-                    swapchain_surface_format=*format;
-                }
-            }
-        }
-
-        let device_memory_properties=unsafe{
-            instance.get_physical_device_memory_properties(physical_device)
-        };
-
         let vulkan=std::sync::Arc::new(VulkanBase{
             entry,
 
@@ -660,37 +625,9 @@ impl Manager{
         });
 
         //Painter related stuff
-        let painter=std::mem::ManuallyDrop::new(Painter{
-            vulkan:vulkan.clone(),
+        let painter=std::mem::ManuallyDrop::new(Painter::new(&vulkan,&test_window,&graphics_queue,&present_queue));
 
-            surface,
-
-            frame_sync_fence,
-
-            swapchain_surface_format,
-
-            present_queue,
-            present_render_pass:vk::RenderPass::null(),
-            window_attachments:std::collections::HashMap::new(),
-
-            graphics_queue,
-
-            render_pass_2d:RenderPass::new(),
-            render_pass_3d:RenderPass::new(),
-        });
-
-        let decoder=std::mem::ManuallyDrop::new(Decoder{
-            vulkan:vulkan.clone(),
-
-            device_memory_properties,
-
-            transfer_queue,
-
-            staging_buffers:Vec::new(),
-
-            meshes:std::collections::HashMap::new(),
-            textures:std::collections::HashMap::new(),
-        });
+        let decoder=std::mem::ManuallyDrop::new(Decoder::new(&vulkan,&transfer_queue));
 
         Self{
             window_manager_handle,
@@ -710,7 +647,7 @@ impl Manager{
             ..Default::default()
         };
         unsafe{
-            self.vulkan.device.create_semaphore(&semaphore_create_info,self.get_allocation_callbacks())
+            self.vulkan.device.create_semaphore(&semaphore_create_info,self.vulkan.get_allocation_callbacks())
         }
     }
 
@@ -724,7 +661,7 @@ impl Manager{
             ..Default::default()
         };
         unsafe{
-            self.vulkan.device.create_fence(&fence_create_info,self.get_allocation_callbacks())
+            self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
         }
     }
 
@@ -767,7 +704,7 @@ impl Manager{
                         ..Default::default()
                     };
                     surface=unsafe{
-                        win32_surface.create_win32_surface(&surface_create_info,self.get_allocation_callbacks())
+                        win32_surface.create_win32_surface(&surface_create_info,self.vulkan.get_allocation_callbacks())
                     }.unwrap();
 
                     WindowHandle::Windows{
