@@ -90,12 +90,22 @@ pub struct RenderPass{
 
     pub render_pass:vk::RenderPass,
 
+    pub extent:vk::Extent2D,
+
     //color information
+    pub color_image_format:vk::Format,
+    pub color_image_layout:vk::ImageLayout,
     pub color_image:vk::Image,
+    pub color_image_memory:vk::DeviceMemory,
     pub color_image_view:vk::ImageView,
     //depth information
+    pub depth_image_format:vk::Format,
+    pub depth_image_layout:vk::ImageLayout,
     pub depth_image:vk::Image,
+    pub depth_image_memory:vk::DeviceMemory,
     pub depth_image_view:vk::ImageView,
+
+    pub framebuffer:vk::Framebuffer,
 
     //shader stuff
     pub pipelines:std::collections::HashMap<String,GraphicsPipeline>,
@@ -104,21 +114,312 @@ pub struct RenderPass{
     pub rendering_done:vk::Semaphore,
 }
 impl RenderPass{
-    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>)->Self{
+    pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>,surface:&extensions::khr::Surface,window:&crate::Window)->Self{
+        let surface_formats=unsafe{
+            surface.get_physical_device_surface_formats(vulkan.physical_device,window.surface)
+        }.unwrap();
+        let mut surface_format=surface_formats[0];
+        //if the only supported format is 'undefined', there is no preferred format for the surface
+        //then use 'most widely used' format
+        if surface_formats.len()==1 && surface_format.format==vk::Format::UNDEFINED{
+            surface_format=vk::SurfaceFormatKHR{
+                format:vk::Format::R8G8B8A8_UNORM,
+                color_space:vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            };
+        }else{
+            for format in surface_formats.iter(){
+                if format.format==vk::Format::R8G8B8A8_UNORM{
+                    surface_format=*format;
+                }
+            }
+        }
+
+        let depth_image_format=&[vk::Format::D32_SFLOAT,vk::Format::D32_SFLOAT_S8_UINT,vk::Format::D24_UNORM_S8_UINT].iter().find(|depth_format|{
+            unsafe{
+                vulkan.instance.get_physical_device_format_properties(vulkan.physical_device,**depth_format)
+            }.optimal_tiling_features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        }).unwrap();
+        let depth_image_format=**depth_image_format;
+
+        let color_image_format=surface_format.format;
+        
+        let color_image_layout=vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+        let depth_image_layout=vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        let depth_image_layout_has_stencil_component=depth_image_format!=vk::Format::D32_SFLOAT;
+
+        let color_image_create_info=vk::ImageCreateInfo{
+            image_type:vk::ImageType::TYPE_2D,
+            format:color_image_format,
+            extent:vk::Extent3D{
+                height:window.extent.height,
+                width:window.extent.width,
+                depth:1
+            },
+            mip_levels:1,
+            array_layers:1,
+            samples:vk::SampleCountFlags::TYPE_1,
+            tiling:if unsafe{
+                vulkan.instance.get_physical_device_format_properties(
+                    vulkan.physical_device,color_image_format
+                ).optimal_tiling_features.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT)
+            }{
+                vk::ImageTiling::OPTIMAL
+            }else{
+                vk::ImageTiling::LINEAR
+            },
+            usage:vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            sharing_mode:vk::SharingMode::EXCLUSIVE,
+            initial_layout:vk::ImageLayout::UNDEFINED,
+            ..Default::default()
+        };
+        let color_image=unsafe{
+            vulkan.device.create_image(&color_image_create_info,vulkan.get_allocation_callbacks())
+        }.unwrap();
+        let color_image_memory={
+            let color_image_memory_requirements=unsafe{
+                vulkan.device.get_image_memory_requirements(color_image)
+            };
+            let memory_types=unsafe{
+                vulkan.instance.get_physical_device_memory_properties(vulkan.physical_device).memory_types
+            };
+            let memory_allocate_info=vk::MemoryAllocateInfo{
+                allocation_size:color_image_memory_requirements.size,
+                memory_type_index:memory_types.iter().enumerate().find(|(index,memory_type)|{
+                    ((1u32 << *index) & color_image_memory_requirements.memory_type_bits)>0 
+                    && memory_type.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                }).unwrap().0 as u32,
+                ..Default::default()
+            };
+            unsafe{
+                vulkan.device.allocate_memory(&memory_allocate_info,vulkan.get_allocation_callbacks())
+            }
+        }.unwrap();
+        unsafe{
+            vulkan.device.bind_image_memory(color_image,color_image_memory,0)
+        }.unwrap();
+        let color_image_view_create_info=vk::ImageViewCreateInfo{
+            image:color_image,
+            view_type:vk::ImageViewType::TYPE_2D,
+            format:color_image_format,
+            components:vk::ComponentMapping{
+                r:vk::ComponentSwizzle::IDENTITY,
+                g:vk::ComponentSwizzle::IDENTITY,
+                b:vk::ComponentSwizzle::IDENTITY,
+                a:vk::ComponentSwizzle::IDENTITY,
+            },
+            subresource_range:vk::ImageSubresourceRange{
+                aspect_mask:vk::ImageAspectFlags::COLOR,
+                base_mip_level:0,
+                level_count:1,
+                base_array_layer:0,
+                layer_count:1,
+            },
+            ..Default::default()
+        };
+        let color_image_view=unsafe{
+            vulkan.device.create_image_view(&color_image_view_create_info,vulkan.get_allocation_callbacks())
+        }.unwrap();
+
+        let depth_image_create_info=vk::ImageCreateInfo{
+            image_type:vk::ImageType::TYPE_2D,
+            format:depth_image_format,
+            extent:vk::Extent3D{
+                height:window.extent.height,
+                width:window.extent.width,
+                depth:1
+            },
+            mip_levels:1,
+            array_layers:1,
+            samples:vk::SampleCountFlags::TYPE_1,
+            tiling:if unsafe{
+                vulkan.instance.get_physical_device_format_properties(
+                    vulkan.physical_device,depth_image_format
+                ).optimal_tiling_features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+            }{
+                vk::ImageTiling::OPTIMAL
+            }else{
+                vk::ImageTiling::LINEAR
+            },
+            usage:vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            sharing_mode:vk::SharingMode::EXCLUSIVE,
+            initial_layout:vk::ImageLayout::UNDEFINED,
+            ..Default::default()
+        };
+        let depth_image=unsafe{
+            vulkan.device.create_image(&depth_image_create_info,vulkan.get_allocation_callbacks())
+        }.unwrap();
+        let depth_image_memory={
+            let depth_image_memory_requirements=unsafe{
+                vulkan.device.get_image_memory_requirements(depth_image)
+            };
+            let memory_types=unsafe{
+                vulkan.instance.get_physical_device_memory_properties(vulkan.physical_device).memory_types
+            };
+            let memory_allocate_info=vk::MemoryAllocateInfo{
+                allocation_size:depth_image_memory_requirements.size,
+                memory_type_index:memory_types.iter().enumerate().find(|(index,memory_type)|{
+                    ((1u32 << *index) & depth_image_memory_requirements.memory_type_bits)>0 
+                    && memory_type.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                }).unwrap().0 as u32,
+                ..Default::default()
+            };
+            unsafe{
+                vulkan.device.allocate_memory(&memory_allocate_info,vulkan.get_allocation_callbacks())
+            }
+        }.unwrap();
+        unsafe{
+            vulkan.device.bind_image_memory(depth_image,depth_image_memory,0)
+        }.unwrap();
+        let depth_image_view_create_info=vk::ImageViewCreateInfo{
+            image:depth_image,
+            view_type:vk::ImageViewType::TYPE_2D,
+            format:depth_image_format,
+            components:vk::ComponentMapping{
+                r:vk::ComponentSwizzle::IDENTITY,
+                g:vk::ComponentSwizzle::IDENTITY,
+                b:vk::ComponentSwizzle::IDENTITY,
+                a:vk::ComponentSwizzle::IDENTITY,
+            },
+            subresource_range:vk::ImageSubresourceRange{
+                aspect_mask:if depth_image_layout_has_stencil_component{
+                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+                }else{
+                    vk::ImageAspectFlags::DEPTH
+                },
+                base_mip_level:0,
+                level_count:1,
+                base_array_layer:0,
+                layer_count:1,
+            },
+            ..Default::default()
+        };
+        let depth_image_view=unsafe{
+            vulkan.device.create_image_view(&depth_image_view_create_info,vulkan.get_allocation_callbacks())
+        }.unwrap();
+
+        let attachments=vec![
+            vk::AttachmentDescription{
+                format:color_image_format,
+                samples:vk::SampleCountFlags::TYPE_1,
+                load_op:vk::AttachmentLoadOp::CLEAR,
+                store_op:vk::AttachmentStoreOp::STORE,
+                initial_layout:vk::ImageLayout::UNDEFINED,
+                final_layout:color_image_layout,
+                ..Default::default()
+            },
+            vk::AttachmentDescription{
+                format:depth_image_format,
+                samples:vk::SampleCountFlags::TYPE_1,
+                load_op:vk::AttachmentLoadOp::CLEAR,
+                store_op:vk::AttachmentStoreOp::STORE,
+                initial_layout:vk::ImageLayout::UNDEFINED,
+                final_layout:depth_image_layout,
+                ..Default::default()
+            },
+        ];
+        let color_attachments=vec![
+            vk::AttachmentReference{
+                attachment:0,
+                layout:color_image_layout,
+            }
+        ];
+        let depth_stencil_attachment=vk::AttachmentReference{
+            attachment:1,
+            layout:depth_image_layout,
+        };
+        let subpasses=vec![
+            vk::SubpassDescription{
+                pipeline_bind_point:vk::PipelineBindPoint::GRAPHICS,
+                color_attachment_count:color_attachments.len() as u32,
+                p_color_attachments:color_attachments.as_ptr(),
+                p_depth_stencil_attachment:&depth_stencil_attachment,
+                ..Default::default()
+            }
+        ];
+        let subpass_dependencies=vec![];
+        let render_pass_create_info=vk::RenderPassCreateInfo{
+            attachment_count:attachments.len() as u32,
+            p_attachments:attachments.as_ptr(),
+            subpass_count:subpasses.len() as u32,
+            p_subpasses:subpasses.as_ptr(),
+            dependency_count:subpass_dependencies.len() as u32,
+            p_dependencies:subpass_dependencies.as_ptr(),
+            ..Default::default()
+        };
+        let render_pass=unsafe{
+            vulkan.device.create_render_pass(&render_pass_create_info,vulkan.get_allocation_callbacks())
+        }.unwrap();
+
+        let framebuffer_attachments=vec![
+            color_image_view,
+            depth_image_view,
+        ];
+        let framebuffer_create_info=vk::FramebufferCreateInfo{
+            render_pass,
+            attachment_count:framebuffer_attachments.len() as u32,
+            p_attachments:framebuffer_attachments.as_ptr(),
+            width:window.extent.width,
+            height:window.extent.height,
+            layers:1,
+            ..Default::default()
+        };
+        let framebuffer=unsafe{
+            vulkan.device.create_framebuffer(&framebuffer_create_info,vulkan.get_allocation_callbacks())
+        }.unwrap();
+
         Self{
             vulkan:vulkan.clone(),
 
-            render_pass:vk::RenderPass::null(),
+            render_pass,
 
-            color_image:vk::Image::null(),
-            color_image_view:vk::ImageView::null(),
+            extent:window.extent,
 
-            depth_image:vk::Image::null(),
-            depth_image_view:vk::ImageView::null(),
+            color_image_format,
+            color_image_layout,
+            color_image,
+            color_image_memory,
+            color_image_view,
+
+            depth_image_format,
+            depth_image_layout,
+            depth_image,
+            depth_image_memory,
+            depth_image_view,
+
+            framebuffer,
 
             pipelines:std::collections::HashMap::new(),
 
-            rendering_done:vk::Semaphore::null(),
+            rendering_done:vulkan.create_semaphore().unwrap(),
+        }
+    }
+}
+impl Drop for RenderPass{
+    fn drop(&mut self){
+        unsafe{
+            /*
+            for (key,pipeline) in self.pipelines.iter(){
+                self.device.destroy_pipeline(pipeline.pipeline, self.get_allocation_callbacks());
+                self.device.destroy_pipeline_layout(pipeline.layout, self.get_allocation_callbacks());
+                
+                self.device.destroy_shader_module(pipeline.vertex,self.get_allocation_callbacks());
+                self.device.destroy_shader_module(pipeline.fragment,self.get_allocation_callbacks());
+            }
+            */
+            self.vulkan.device.destroy_semaphore(self.rendering_done,self.vulkan.get_allocation_callbacks());
+
+            self.vulkan.device.destroy_framebuffer(self.framebuffer,self.vulkan.get_allocation_callbacks());
+
+            self.vulkan.device.destroy_render_pass(self.render_pass,self.vulkan.get_allocation_callbacks());
+            
+            self.vulkan.device.destroy_image_view(self.color_image_view,self.vulkan.get_allocation_callbacks());
+            self.vulkan.device.destroy_image_view(self.depth_image_view,self.vulkan.get_allocation_callbacks());
+
+            self.vulkan.device.free_memory(self.color_image_memory,self.vulkan.get_allocation_callbacks());
+            self.vulkan.device.free_memory(self.depth_image_memory,self.vulkan.get_allocation_callbacks());
+
+            self.vulkan.device.destroy_image(self.color_image,self.vulkan.get_allocation_callbacks());
+            self.vulkan.device.destroy_image(self.depth_image,self.vulkan.get_allocation_callbacks());
         }
     }
 }
@@ -129,12 +430,16 @@ pub struct WindowAttachments{
     pub image_available:vk::Semaphore,
     pub image_transferable:vk::Semaphore,
     pub image_presentable:vk::Semaphore,
+    pub copy_done:vk::Semaphore,
     
     pub swapchain:extensions::khr::Swapchain,
     pub swapchain_handle:vk::SwapchainKHR,
     pub swapchain_images:Vec<vk::Image>,
     pub swapchain_image_views:Vec<vk::ImageView>,
     pub swapchain_image_framebuffers:Vec<vk::Framebuffer>,
+
+    pub render_pass_2d:RenderPass,
+    pub render_pass_3d:RenderPass,
 }
 
 pub struct Painter{
@@ -152,32 +457,13 @@ pub struct Painter{
 
     pub window_attachments:std::collections::HashMap<u32,WindowAttachments>,
 
-    pub graphics_queue:crate::Queue,
-
-    pub render_pass_2d:RenderPass,
-    pub render_pass_3d:RenderPass,
+    pub graphics_queue:crate::Queue
 }
+
 impl Drop for Painter{
     fn drop(&mut self){
         unsafe{
             self.vulkan.device.destroy_fence(self.frame_sync_fence,self.vulkan.get_allocation_callbacks());
-            /*
-            self.device.destroy_sampler(self.sampler,self.get_allocation_callbacks());
-
-            self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, self.get_allocation_callbacks());
-
-            self.device.destroy_descriptor_pool(self.descriptor_pool, self.get_allocation_callbacks());
-
-            for pipeline in &[&self.graphics_pipeline_2d,&self.graphics_pipeline_3d]{
-                self.device.destroy_pipeline(pipeline.pipeline, self.get_allocation_callbacks());
-                self.device.destroy_pipeline_layout(pipeline.layout, self.get_allocation_callbacks());
-                
-                self.device.destroy_shader_module(pipeline.vertex,self.get_allocation_callbacks());
-                self.device.destroy_shader_module(pipeline.fragment,self.get_allocation_callbacks());
-            }
-
-            self.device.destroy_render_pass(self.render_pass, self.get_allocation_callbacks());
-            */
         }
     }
 }
@@ -217,8 +503,11 @@ impl Painter{
         }
 
         let mut present_queue=present_queue;
+        let mut graphics_queue=graphics_queue;
         //ensure existence of at least 2 command buffers
         let range=present_queue.create_command_buffers(2);
+        println!("created command buffers in this range: {:?}",range);
+        let range=graphics_queue.create_command_buffers(3);
         println!("created command buffers in this range: {:?}",range);
 
         Self{
@@ -235,9 +524,6 @@ impl Painter{
             window_attachments:std::collections::HashMap::new(),
 
             graphics_queue,
-
-            render_pass_2d:RenderPass::new(&vulkan),
-            render_pass_3d:RenderPass::new(&vulkan),
         }
     }
 
@@ -248,13 +534,108 @@ impl Painter{
         for id in window_ids{
             let window_attachment=self.window_attachments.get(id).unwrap();
             //for each renderpass (2d and 3d):
+            {
+                let command_buffer=self.graphics_queue.command_buffers[0];
+                let command_buffer_begin_info=vk::CommandBufferBeginInfo{
+                    flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.begin_command_buffer(command_buffer,&command_buffer_begin_info)
+                }.unwrap();
+                let clear_values=vec![
+                    vk::ClearValue{
+                        color:vk::ClearColorValue{
+                            float32:[1.0,0.5,0.5,1.0]
+                        }
+                    },
+                    vk::ClearValue{
+                        depth_stencil:vk::ClearDepthStencilValue{
+                            depth:1.0,
+                            stencil:0,
+                        }
+                    }
+                ];
+                let render_pass_begin_info=vk::RenderPassBeginInfo{
+                    render_pass:window_attachment.render_pass_2d.render_pass,
+                    framebuffer:window_attachment.render_pass_2d.framebuffer,
+                    render_area:vk::Rect2D{
+                        offset:vk::Offset2D{
+                            x:0,
+                            y:0,
+                        },
+                        extent:window_attachment.render_pass_2d.extent,
+                    },
+                    clear_value_count:clear_values.len() as u32,
+                    p_clear_values:clear_values.as_ptr(),
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.cmd_begin_render_pass(command_buffer,&render_pass_begin_info,vk::SubpassContents::INLINE)
+                };
+                unsafe{
+                    self.vulkan.device.cmd_end_render_pass(command_buffer)
+                };
+                unsafe{
+                    self.vulkan.device.end_command_buffer(command_buffer)
+                }.unwrap();
+
+                let wait_semaphores=vec![];
+                let command_buffers=vec![
+                    command_buffer
+                ];
+                let signal_semaphores=vec![
+                    window_attachment.render_pass_2d.rendering_done
+                ];
+                let submit_info=vk::SubmitInfo{
+                    wait_semaphore_count:wait_semaphores.len() as u32,
+                    p_wait_semaphores:wait_semaphores.as_ptr(),
+                    p_wait_dst_stage_mask:&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    command_buffer_count:command_buffers.len() as u32,
+                    p_command_buffers:command_buffers.as_ptr(),
+                    signal_semaphore_count:signal_semaphores.len() as u32,
+                    p_signal_semaphores:signal_semaphores.as_ptr(),
+                    ..Default::default()
+                };
+
+                let fence_create_info=vk::FenceCreateInfo{
+                    ..Default::default()
+                };
+                let fence=unsafe{
+                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
+                }.unwrap();
+                unsafe{
+                    self.vulkan.device.queue_submit(self.graphics_queue.queue,&[submit_info],fence)
+                }.unwrap();
+                unsafe{
+                    self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
+                }.unwrap();
+                println!("fence 1");
+                unsafe{
+                    self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
+                }
+            }
+                //TODO
                 //draw camera perspective to framebuffer
+                    //TODO
+                    
             //acquire swapchain image
-            
-            //acquire next swapchain image for drawing and presenting
+                let fence_create_info=vk::FenceCreateInfo{
+                    ..Default::default()
+                };
+                let fence=unsafe{
+                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
+                }.unwrap();
             let (image_index,suboptimal)=unsafe{
-                window_attachment.swapchain.acquire_next_image(window_attachment.swapchain_handle, u64::MAX, window_attachment.image_available, vk::Fence::null())
+                window_attachment.swapchain.acquire_next_image(window_attachment.swapchain_handle, u64::MAX, window_attachment.image_available, fence)
             }.unwrap();
+            unsafe{
+                self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
+            }.unwrap();
+            println!("fence 2");
+            unsafe{
+                self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
+            }
 
             //this means the swapchain should be recreated, but we dont care much right now
             if suboptimal{
@@ -274,29 +655,28 @@ impl Painter{
                 unsafe{
                     self.vulkan.device.begin_command_buffer(command_buffer,&present_queue_command_buffer_begin_info)
                 }.unwrap();
-                let subresource_range=vk::ImageSubresourceRange{
-                    aspect_mask:vk::ImageAspectFlags::COLOR,
-                    base_mip_level:0,
-                    level_count:1,
-                    base_array_layer:0,
-                    layer_count:1,
-                };
                 let image_memory_barrier=vk::ImageMemoryBarrier{
-                    src_access_mask:vk::AccessFlags::MEMORY_READ,
-                    dst_access_mask:vk::AccessFlags::MEMORY_READ,
+                    src_access_mask:vk::AccessFlags::empty(),
+                    dst_access_mask:vk::AccessFlags::TRANSFER_WRITE,
                     old_layout:vk::ImageLayout::UNDEFINED,
-                    new_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     src_queue_family_index:self.present_queue.family_index,
-                    dst_queue_family_index:self.present_queue.family_index,
+                    dst_queue_family_index:self.graphics_queue.family_index,
                     image:swapchain_image,
-                    subresource_range,
+                    subresource_range:vk::ImageSubresourceRange{
+                        aspect_mask:vk::ImageAspectFlags::COLOR,
+                        base_mip_level:0,
+                        level_count:1,
+                        base_array_layer:0,
+                        layer_count:1,
+                    },
                     ..Default::default()
                 };
                 unsafe{
                     self.vulkan.device.cmd_pipeline_barrier(
                         command_buffer,
-                        vk::PipelineStageFlags::TOP_OF_PIPE, 
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, 
+                        vk::PipelineStageFlags::ALL_COMMANDS, 
+                        vk::PipelineStageFlags::ALL_COMMANDS, 
                         vk::DependencyFlags::empty(),
                         &[],
                         &[],
@@ -311,9 +691,6 @@ impl Painter{
                 let wait_semaphores_1=vec![
                     window_attachment.image_available,
                 ];
-                let dst_stage_masks_1=vec![
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                ];
                 let command_buffers_1=vec![
                     command_buffer
                 ];
@@ -323,16 +700,140 @@ impl Painter{
                 let submit_info_1=vk::SubmitInfo{
                     wait_semaphore_count:wait_semaphores_1.len() as u32,
                     p_wait_semaphores:wait_semaphores_1.as_ptr(),
-                    p_wait_dst_stage_mask:dst_stage_masks_1.as_ptr(),
+                    p_wait_dst_stage_mask:&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                     command_buffer_count:command_buffers_1.len() as u32,
                     p_command_buffers:command_buffers_1.as_ptr(),
                     signal_semaphore_count:signal_semaphores_1.len() as u32,
                     p_signal_semaphores:signal_semaphores_1.as_ptr(),
                     ..Default::default()
                 };
-                unsafe{
-                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],vk::Fence::null())
+                let fence_create_info=vk::FenceCreateInfo{
+                    ..Default::default()
+                };
+                let fence=unsafe{
+                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
                 }.unwrap();
+                unsafe{
+                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],fence)
+                }.unwrap();
+                unsafe{
+                    self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
+                }.unwrap();
+                println!("fence 3");
+                unsafe{
+                    self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
+                }
+            }
+            //retrieve from present queue
+            {
+                let command_buffer=self.graphics_queue.command_buffers[2];
+                let command_buffer_begin_info=vk::CommandBufferBeginInfo{
+                    flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.begin_command_buffer(command_buffer,&command_buffer_begin_info)
+                }.unwrap();
+                let image_memory_barrier_present_to_graphics=vk::ImageMemoryBarrier{
+                    src_access_mask:vk::AccessFlags::empty(),
+                    dst_access_mask:vk::AccessFlags::TRANSFER_WRITE,
+                    old_layout:if self.graphics_queue.family_index==self.present_queue.family_index{
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                    }else{
+                        vk::ImageLayout::UNDEFINED
+                    },
+                    new_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    src_queue_family_index:self.present_queue.family_index,
+                    dst_queue_family_index:self.graphics_queue.family_index,
+                    image:swapchain_image,
+                    subresource_range:vk::ImageSubresourceRange{
+                        aspect_mask:vk::ImageAspectFlags::COLOR,
+                        base_mip_level:0,
+                        level_count:1,
+                        base_array_layer:0,
+                        layer_count:1,
+                    },
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::ALL_COMMANDS,//src_stage_mask
+                        vk::PipelineStageFlags::ALL_COMMANDS,
+                        vk::DependencyFlags::empty(),
+                        &[],//memory barriers
+                        &[],//buffer memory barriers
+                        &[image_memory_barrier_present_to_graphics]//image memory barriers
+                    )
+                };
+                let image_memory_barrier_graphics_to_present=vk::ImageMemoryBarrier{
+                    src_access_mask:vk::AccessFlags::TRANSFER_WRITE,
+                    dst_access_mask:vk::AccessFlags::MEMORY_READ,
+                    old_layout:vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    new_layout:vk::ImageLayout::PRESENT_SRC_KHR,
+                    src_queue_family_index:self.graphics_queue.family_index,
+                    dst_queue_family_index:self.present_queue.family_index,
+                    image:swapchain_image,
+                    subresource_range:vk::ImageSubresourceRange{
+                        aspect_mask:vk::ImageAspectFlags::COLOR,
+                        base_mip_level:0,
+                        level_count:1,
+                        base_array_layer:0,
+                        layer_count:1,
+                    },
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::ALL_COMMANDS,//src_stage_mask
+                        vk::PipelineStageFlags::ALL_COMMANDS,
+                        vk::DependencyFlags::empty(),
+                        &[],//memory barriers
+                        &[],//buffer memory barriers
+                        &[image_memory_barrier_graphics_to_present]//image memory barriers
+                    )
+                };
+                unsafe{
+                    self.vulkan.device.end_command_buffer(command_buffer)
+                }.unwrap();
+
+                let wait_semaphores=vec![
+                    window_attachment.image_transferable,
+                    window_attachment.render_pass_2d.rendering_done
+                ];
+                let command_buffers=vec![
+                    command_buffer
+                ];
+                let signal_semaphores=vec![
+                    window_attachment.copy_done
+                ];
+                let submit_info=vk::SubmitInfo{
+                    wait_semaphore_count:wait_semaphores.len() as u32,
+                    p_wait_semaphores:wait_semaphores.as_ptr(),
+                    p_wait_dst_stage_mask:&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    command_buffer_count:command_buffers.len() as u32,
+                    p_command_buffers:command_buffers.as_ptr(),
+                    signal_semaphore_count:signal_semaphores.len() as u32,
+                    p_signal_semaphores:signal_semaphores.as_ptr(),
+                    ..Default::default()
+                };
+                let fence_create_info=vk::FenceCreateInfo{
+                    ..Default::default()
+                };
+                let fence=unsafe{
+                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
+                }.unwrap();
+                unsafe{
+                    self.vulkan.device.queue_submit(self.graphics_queue.queue,&[submit_info],fence)
+                }.unwrap();
+                unsafe{
+                    self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
+                }.unwrap();
+                println!("fence 4");
+                unsafe{
+                    self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
+                }
             }
             //copy 3d image color attachment to swapchain image
             //copy 2d image color attachment to swapchain image
@@ -347,29 +848,32 @@ impl Painter{
                 unsafe{
                     self.vulkan.device.begin_command_buffer(command_buffer,&present_queue_command_buffer_begin_info)
                 }.unwrap();
-                let subresource_range=vk::ImageSubresourceRange{
-                    aspect_mask:vk::ImageAspectFlags::COLOR,
-                    base_mip_level:0,
-                    level_count:1,
-                    base_array_layer:0,
-                    layer_count:1,
-                };
                 let image_memory_barrier=vk::ImageMemoryBarrier{
-                    src_access_mask:vk::AccessFlags::MEMORY_READ,
+                    src_access_mask:vk::AccessFlags::TRANSFER_WRITE,
                     dst_access_mask:vk::AccessFlags::MEMORY_READ,
-                    old_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    old_layout:if self.graphics_queue.family_index==self.present_queue.family_index{ //copy old_layout from 'release' operation only if this is a ownership transfer
+                        vk::ImageLayout::PRESENT_SRC_KHR
+                    }else{
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                    },
                     new_layout:vk::ImageLayout::PRESENT_SRC_KHR,
-                    src_queue_family_index:self.present_queue.family_index,
+                    src_queue_family_index:self.graphics_queue.family_index,
                     dst_queue_family_index:self.present_queue.family_index,
                     image:swapchain_image,
-                    subresource_range,
+                    subresource_range:vk::ImageSubresourceRange{
+                        aspect_mask:vk::ImageAspectFlags::COLOR,
+                        base_mip_level:0,
+                        level_count:1,
+                        base_array_layer:0,
+                        layer_count:1,
+                    },
                     ..Default::default()
                 };
                 unsafe{
                     self.vulkan.device.cmd_pipeline_barrier(
                         command_buffer,
-                        vk::PipelineStageFlags::TOP_OF_PIPE, 
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, 
+                        vk::PipelineStageFlags::ALL_COMMANDS, 
+                        vk::PipelineStageFlags::ALL_COMMANDS, 
                         vk::DependencyFlags::empty(),
                         &[],
                         &[],
@@ -382,35 +886,46 @@ impl Painter{
                 }.unwrap();
                 //submit transition command buffer 1
                 let wait_semaphores_1=vec![
-                    window_attachment.image_transferable,
-                ];
-                let dst_stage_masks_1=vec![
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    window_attachment.copy_done,
                 ];
                 let command_buffers_1=vec![
                     command_buffer
                 ];
                 let signal_semaphores_1=vec![
-                    window_attachment.image_presentable
+                    window_attachment.image_transferable
                 ];
                 let submit_info_1=vk::SubmitInfo{
                     wait_semaphore_count:wait_semaphores_1.len() as u32,
                     p_wait_semaphores:wait_semaphores_1.as_ptr(),
-                    p_wait_dst_stage_mask:dst_stage_masks_1.as_ptr(),
+                    p_wait_dst_stage_mask:&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                     command_buffer_count:command_buffers_1.len() as u32,
                     p_command_buffers:command_buffers_1.as_ptr(),
                     signal_semaphore_count:signal_semaphores_1.len() as u32,
                     p_signal_semaphores:signal_semaphores_1.as_ptr(),
                     ..Default::default()
                 };
-                unsafe{
-                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],vk::Fence::null())
+
+                let fence_create_info=vk::FenceCreateInfo{
+                    ..Default::default()
+                };
+                let fence=unsafe{
+                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
                 }.unwrap();
+                unsafe{
+                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],fence)
+                }.unwrap();
+                unsafe{
+                    self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
+                }.unwrap();
+                println!("fence 5");
+                unsafe{
+                    self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
+                }
             }
             //present swapchain image
             {
                 let present_wait_semaphores=vec![
-                    window_attachment.image_presentable,
+                    window_attachment.image_transferable,
                 ];
                 let mut present_results=vec![
                     vk::Result::SUCCESS,
@@ -1040,6 +1555,9 @@ impl Painter{
             }.unwrap()
         }).collect();
         */
+        
+        let render_pass_2d=RenderPass::new(&self.vulkan,&self.surface,&window);
+        let render_pass_3d=RenderPass::new(&self.vulkan,&self.surface,&window);
 
         let window_attachment=WindowAttachments{
             surface:window.surface,
@@ -1047,12 +1565,16 @@ impl Painter{
             image_available,
             image_transferable,
             image_presentable,
+            copy_done:self.vulkan.create_semaphore().unwrap(),
             
             swapchain,
             swapchain_handle,
             swapchain_images,
             swapchain_image_views,
             swapchain_image_framebuffers,
+        
+            render_pass_2d,
+            render_pass_3d,
         };
 
         self.window_attachments.insert(window.id,window_attachment);
