@@ -14,6 +14,7 @@ extern crate libc;
 extern crate ash;
 extern crate image;
 extern crate nalgebra_glm as glm;
+extern crate itertools;
 
 #[cfg(target_os="windows")]
 use winapi::{
@@ -1027,6 +1028,9 @@ impl Manager{
     }
 
     pub fn run(&mut self){
+        let _=self.decoder.get_mesh("quad.do");
+        let _=self.decoder.get_mesh("bunny.do");
+
         loop{
             if self.step()!=ControlFlow::Continue{
                 break;

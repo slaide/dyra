@@ -102,13 +102,33 @@ pub struct Face{
 
 #[derive(Debug,Clone)]
 pub enum VertexData{
-    Textured(TexturedVertex),
-    Plain(Vertex)
+    Textured(Vec<TexturedVertex>),
+    Plain(Vec<Vertex>)
+}
+impl VertexData{
+    pub fn len(&self)->usize{
+        match self{
+            VertexData::Textured(v)=>v.len(),
+            VertexData::Plain(v)=>v.len(),
+        }
+    }
+    pub fn mem_size(&self)->usize{
+        match self{
+            VertexData::Textured(v)=>v.len()*std::mem::size_of::<TexturedVertex>(),
+            VertexData::Plain(v)=>v.len()*std::mem::size_of::<Vertex>(),
+        }
+    }
+    pub fn as_ptr(&self)->*const libc::c_void{
+        match self{
+            VertexData::Textured(v)=>v.as_ptr() as *const libc::c_void,
+            VertexData::Plain(v)=>v.as_ptr() as *const libc::c_void,
+        }
+    }
 }
 #[derive(Debug,Clone)]
 pub struct Mesh{
     pub vertices:IntegratedBuffer,
-    pub vertex_indices:Option<IntegratedBuffer>,
+    pub vertex_indices:IntegratedBuffer,
 }
 
 #[derive(Debug,Clone,Copy)]
@@ -122,6 +142,12 @@ pub struct StagingBuffer{
     pub buffer:IntegratedBuffer,
     pub buffer_in_use_size:u64,
 }
+impl StagingBuffer{
+    pub fn size_left(&self)->u64{
+        self.buffer.buffer_size-self.buffer_in_use_size
+    }
+}
+
 
 #[derive(Debug,Clone,Copy)]
 pub struct Image{
@@ -150,6 +176,9 @@ impl Decoder{
         let device_memory_properties=unsafe{
             vulkan.instance.get_physical_device_memory_properties(vulkan.physical_device)
         };
+
+        let mut transfer_queue=transfer_queue;
+        let _=transfer_queue.create_command_buffers(8);
         
         Self{
             vulkan:vulkan.clone(),
@@ -165,83 +194,251 @@ impl Decoder{
         }
     }
 
-    #[cfg(disabled)]
-    pub fn get_mesh(&mut self,name:&'static str,command_buffer:vk::CommandBuffer)->std::sync::Arc<Mesh>{
+    pub fn get_mesh(&mut self,name:&'static str){//->std::sync::Arc<Mesh>{
         if let Some(mesh)=self.meshes.get(name){
-            return mesh.clone();
+            //return mesh.clone();
         }
 
         let (vertices,vertex_indices)={
-            let file_content=std::fs::read_to_string(name).unwrap();
+            use std::io::BufRead;
+            let file=std::fs::File::open(name).unwrap();
+            let file_content=std::io::BufReader::new(file);
 
-            let lines=file_content.split('\n');
-            assert!(lines.next().unwrap()=="#settings");
+            let mut lines=file_content.lines();
+            let attribute=lines.next().unwrap();
+            assert!(attribute.unwrap()=="#settings");
 
-            let line=lines.next().unwrap().split('=');
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
             let attribute=line.next().unwrap();
             assert!(attribute=="vertex_coordinate_count");
-            let vertex_coordinate_count=u32::from_str(line.next().unwrap());
+            let vertex_coordinate_count=line.next().unwrap().parse::<u32>().unwrap();
 
-            let line=lines.next().unwrap().split('=');
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
             let attribute=line.next().unwrap();
             assert!(attribute=="vertex_texture_coordinates");
             let vertex_texture_coordinates=line.next().unwrap()=="true";
 
-            let line=lines.next().unwrap().split('=');
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="vertex_texture_coordinate_count");
+            let vertex_texture_coordinate_count=line.next().unwrap().parse::<u32>().unwrap();
+
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
             let attribute=line.next().unwrap();
             assert!(attribute=="vertex_count");
-            let vertex_count=u32::from_str(line.next().unwrap());
+            let vertex_count=line.next().unwrap().parse::<u32>().unwrap();
 
-            let line=lines.next().unwrap().split('=');
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
             let attribute=line.next().unwrap();
             assert!(attribute=="face_count");
-            let face_count=u32::from_str(line.next().unwrap());
+            let face_count=line.next().unwrap().parse::<u32>().unwrap();
 
-            let line=lines.next().unwrap().split('=');
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
             let attribute=line.next().unwrap();
             assert!(attribute=="vertex_data_interleaved_input");
             let vertex_data_interleaved_input=line.next().unwrap()=="true";
 
-            let line=lines.next().unwrap().split('=');
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
             let attribute=line.next().unwrap();
             assert!(attribute=="vertex_data_interleaved_output");
             let vertex_data_interleaved_output=line.next().unwrap()=="true";
 
-            let line=lines.next().unwrap().split('=');
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
             let attribute=line.next().unwrap();
-            assert!(attribute=="vertex_data_interleaved_output");
-            let vertex_data_interleaved_output=line.next().unwrap()=="true";
+            assert!(attribute=="material_location_external");
+            let material_location_external=line.next().unwrap()=="true";
 
-            assert!(lines.next().unwrap()=="#defaults");
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="index_start");
+            let index_start=line.next().unwrap().parse::<u16>().unwrap();
 
-            let default_v_x=0.0;
-            let default_v_y=0.0;
-            let default_v_z=0.0;
-            let default_v_w=0.0;
-            let default_vt_u=0.0;
-            let default_vt_v=0.0;
-            let default_vt_w=0.0;
+            assert!(lines.next().unwrap().unwrap()=="#defaults");
 
-            for line in lines{
-                println!("{}",line);
-            }
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="v.z");
+            let default_v_z=line.next().unwrap().parse::<f32>().unwrap();
 
-            let quad=set.objects[0].clone();
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="v.w");
+            let default_v_w=line.next().unwrap().parse::<f32>().unwrap();
 
-            //assert!(quad.vertices.len()==quad.tex_vertices.len());
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="vt.w");
+            let default_vt_w=line.next().unwrap().parse::<f32>().unwrap();
+            
+            assert!(lines.next().unwrap().unwrap()=="#vertexdata");
 
-            //let vertices:Vec<Vertex>=quad.vertices.iter().zip(quad.tex_vertices.iter()).map(|(v,vt)| Vertex::new(v.x as f32,v.y as f32,v.z as f32,1.0,vt.u as f32,vt.v as f32)).collect();
-            let vertices:Vec<Vertex>=quad.vertices.iter().map(|v| Vertex::new(v.x as f32,v.y as f32,v.z as f32,1.0,v.x as f32,v.y as f32)).collect();
-            let vertex_indices:Vec<VertexIndices>=quad.geometry[0].shapes.iter().map(|s| match s.primitive{
-                obj::obj::Primitive::Triangle(i0,i1,i2)=>VertexIndices::new(i0.0 as u16,i1.0 as u16,i2.0 as u16),
-                _=>panic!("non-triangle shape")
-            }).collect();
+            let vertex_data_line_count=if vertex_texture_coordinates{
+                vertex_count*2
+            }else{
+                vertex_count
+            };
+
+            let mut vertices={
+                if vertex_texture_coordinates{
+                    let vertex_data_count=(vertex_count*2) as usize;
+                    let mut vertices=Vec::with_capacity(vertex_data_count);
+                    use itertools::Itertools;
+                    if vertex_data_interleaved_input{
+                        vertices.extend(lines.by_ref().take(vertex_data_count).tuples().map(|(line1,line2)|{
+                            let vertex_data=line1.unwrap();
+                            let vertex_texture_data=line2.unwrap();
+
+                            let mut vertex_data=vertex_data.split(' ');
+                            let mut vertex_texture_data=vertex_texture_data.split(' ');
+
+                            assert!(vertex_data.next().unwrap()=="v");
+                            let vertex_coordinates=VertexCoordinates{
+                                x:vertex_data.next().unwrap().parse::<f32>().unwrap(),
+                                y:vertex_data.next().unwrap().parse::<f32>().unwrap(),
+                                z:match vertex_coordinate_count{
+                                    2=>default_v_z,
+                                    3=>vertex_data.next().unwrap().parse::<f32>().unwrap(),
+                                    4=>vertex_data.next().unwrap().parse::<f32>().unwrap(),
+                                    _=>unreachable!(),
+                                },
+                                w:match vertex_coordinate_count{
+                                    3=>default_v_w,
+                                    4=>vertex_data.next().unwrap().parse::<f32>().unwrap(),
+                                    _=>unreachable!(),
+                                }
+                            };
+                            assert!(vertex_data.next().is_none());
+
+                            assert!(vertex_texture_data.next().unwrap()=="vt");
+                            let vertex_texture_coordinates=VertexTextureCoordinates{
+                                u:vertex_texture_data.next().unwrap().parse::<f32>().unwrap(),
+                                v:vertex_texture_data.next().unwrap().parse::<f32>().unwrap(),
+                                w:match vertex_texture_coordinate_count{
+                                    2=>default_vt_w,
+                                    3=>vertex_texture_data.next().unwrap().parse::<f32>().unwrap(),
+                                    _=>unreachable!(),
+                                }
+                            };
+                            let vertex=TexturedVertex{
+                                vertex_coordinates,
+                                vertex_texture_coordinates
+                            };
+                            assert!(vertex_texture_data.next().is_none());
+                            vertex
+                        }));
+                    }else{
+                        let mut vertex_coordinates=Vec::with_capacity(vertex_count as usize);
+                        vertex_coordinates.extend(lines.by_ref().take(vertex_count as usize).map(|line|{
+                            let line=line.unwrap();
+                            let mut data=line.split(' ');
+                            assert!(data.next().unwrap()=="v");
+                            let vertex_coordinates=VertexCoordinates{
+                                x:data.next().unwrap().parse::<f32>().unwrap(),
+                                y:data.next().unwrap().parse::<f32>().unwrap(),
+                                z:match vertex_coordinate_count{
+                                    2=>default_v_z,
+                                    3=>data.next().unwrap().parse::<f32>().unwrap(),
+                                    4=>data.next().unwrap().parse::<f32>().unwrap(),
+                                    _=>unreachable!(),
+                                },
+                                w:match vertex_coordinate_count{
+                                    3=>default_v_w,
+                                    4=>data.next().unwrap().parse::<f32>().unwrap(),
+                                    _=>unreachable!(),
+                                }
+                            };
+                            assert!(data.next().is_none());
+
+                            vertex_coordinates
+                        }));
+                        let mut vertex_texture_coordinates=Vec::with_capacity(vertex_count as usize);
+                        vertex_texture_coordinates.extend(lines.by_ref().take(vertex_count as usize).map(|line|{
+                            let line=line.unwrap();
+                            let mut data=line.split(' ');
+                            assert!(data.next().unwrap()=="vt");
+                            VertexTextureCoordinates{
+                                u:data.next().unwrap().parse::<f32>().unwrap(),
+                                v:data.next().unwrap().parse::<f32>().unwrap(),
+                                w:match vertex_texture_coordinate_count{
+                                    2=>default_vt_w,
+                                    3=>data.next().unwrap().parse::<f32>().unwrap(),
+                                    _=>unreachable!(),
+                                },
+                            }
+                        }));
+                        vertices.extend(vertex_coordinates.iter().zip(vertex_texture_coordinates.iter()).map(|(vertex_coordinates,vertex_texture_coordinates)|{
+                            TexturedVertex{
+                                vertex_coordinates:vertex_coordinates.clone(),
+                                vertex_texture_coordinates:vertex_texture_coordinates.clone()
+                            }
+                        }));
+                    }
+                    VertexData::Textured(vertices)
+                }else{
+                    let vertex_data_count=vertex_count as usize;
+                    let mut vertices=Vec::with_capacity(vertex_data_count);
+                    vertices.extend(lines.by_ref().take(vertex_data_count).map(|line|{
+                        let data=line.unwrap();
+                        let mut data=data.split(' ');
+                        assert!(data.next().unwrap()=="v");
+                        let vertex=Vertex{
+                            vertex_coordinates:VertexCoordinates{
+                                x:data.next().unwrap().parse::<f32>().unwrap(),
+                                y:data.next().unwrap().parse::<f32>().unwrap(),
+                                z:match vertex_coordinate_count{
+                                    2=>default_v_z,
+                                    3=>data.next().unwrap().parse::<f32>().unwrap(),
+                                    4=>data.next().unwrap().parse::<f32>().unwrap(),
+                                    _=>unreachable!(),
+                                },
+                                w:match vertex_coordinate_count{
+                                    3=>default_v_w,
+                                    4=>data.next().unwrap().parse::<f32>().unwrap(),
+                                    _=>unreachable!(),
+                                }
+                            }
+                        };
+                        assert!(data.next().is_none());
+                        vertex
+                    }));
+                    VertexData::Plain(vertices)
+                }
+            };
+            
+            assert!(lines.next().unwrap().unwrap()=="#facedata");
+
+            let mut vertex_indices:Vec::<Face>=Vec::with_capacity(face_count as usize);
+            vertex_indices.extend(lines.by_ref().take(face_count as usize).map(|line|{
+                let data=line.unwrap();
+                let mut data=data.split(' ');
+                assert!(data.next().unwrap()=="f");
+                let face=Face{
+                    a:data.next().unwrap().parse::<u16>().unwrap()-index_start,
+                    b:data.next().unwrap().parse::<u16>().unwrap()-index_start,
+                    c:data.next().unwrap().parse::<u16>().unwrap()-index_start,
+                };
+                assert!(data.next().is_none());
+                face
+            }));
+            //println!("{:?}",&vertex_indices);
 
             (vertices,vertex_indices)
         };
 
         let (vertices_size,vertices_buffer,vertices_memory)={
-            let size=(vertices.len() * std::mem::size_of::<Vertex>()) as u64;
+            let size=vertices.mem_size() as u64;
             let buffer_create_info=vk::BufferCreateInfo{
                 size:size,
                 usage:vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
@@ -249,13 +446,13 @@ impl Decoder{
                 ..Default::default()
             };
             let buffer=unsafe{
-                self.device.create_buffer(&buffer_create_info,self.get_allocation_callbacks())
+                self.vulkan.device.create_buffer(&buffer_create_info,self.vulkan.get_allocation_callbacks())
             }.unwrap();
 
             let mut memory=vk::DeviceMemory::null();
 
             let buffer_memory_requirements=unsafe{
-                self.device.get_buffer_memory_requirements(buffer)
+                self.vulkan.device.get_buffer_memory_requirements(buffer)
             };
 
             for memory_type_index in 0..self.device_memory_properties.memory_type_count{
@@ -268,47 +465,53 @@ impl Decoder{
                         ..Default::default()
                     };
                     memory=unsafe{
-                        self.device.allocate_memory(&memory_allocate_info,self.get_allocation_callbacks())
+                        self.vulkan.device.allocate_memory(&memory_allocate_info,self.vulkan.get_allocation_callbacks())
                     }.unwrap();
 
                     //bind
                     let buffer_memory_offset=0;
                     unsafe{
-                        self.device.bind_buffer_memory(buffer,memory,buffer_memory_offset)
+                        self.vulkan.device.bind_buffer_memory(buffer,memory,buffer_memory_offset)
                     }.unwrap();
 
-                    let offset=self.staging_buffer_in_use_size;
-                    self.staging_buffer_in_use_size+=buffer_memory_requirements.size;
+                    let mut staging_buffer=if let Some(sb)=self.staging_buffers.iter_mut().find(|sb|sb.size_left()>=size){
+                        sb
+                    }else{
+                        self.new_staging(size.next_power_of_two());
+                        let last_index=self.staging_buffers.len()-1;
+                        &mut self.staging_buffers[last_index]
+                    };
+                    let offset=staging_buffer.buffer_in_use_size;
+                    staging_buffer.buffer_in_use_size+=buffer_memory_requirements.size;
 
                     //map staging (!)
                     let memory_pointer=unsafe{
-                        self.device.map_memory(self.staging_buffer.memory,offset,size,vk::MemoryMapFlags::empty())
+                        self.vulkan.device.map_memory(staging_buffer.buffer.memory,offset,size,vk::MemoryMapFlags::empty())
                     }.unwrap();
 
                     //memcpy
                     unsafe{
-                        libc::memcpy(memory_pointer,vertices.as_ptr() as *const libc::c_void,size as usize);
+                        libc::memcpy(memory_pointer,vertices.as_ptr(),size as usize);
                     }
 
                     //flush
                     let flush_range=vk::MappedMemoryRange{
-                        memory:self.staging_buffer.memory,
+                        memory:staging_buffer.buffer.memory,
                         offset,
-                        //size,
                         size:vk::WHOLE_SIZE,
                         ..Default::default()
                     };
                     unsafe{
-                        self.device.flush_mapped_memory_ranges(&[flush_range])
+                        self.vulkan.device.flush_mapped_memory_ranges(&[flush_range])
                     }.unwrap();
 
                     //unmap
                     unsafe{
-                        self.device.unmap_memory(self.staging_buffer.memory);
+                        self.vulkan.device.unmap_memory(staging_buffer.buffer.memory);
                     }
 
                     unsafe{
-                        self.device.cmd_copy_buffer(command_buffer,self.staging_buffer.buffer,buffer,&[
+                        self.vulkan.device.cmd_copy_buffer(self.transfer_queue.command_buffers[0],staging_buffer.buffer.buffer,buffer,&[
                             vk::BufferCopy{
                                 src_offset:offset,
                                 dst_offset:0,
@@ -328,7 +531,7 @@ impl Decoder{
         };
 
         let (vertex_indices_size,vertex_indices_buffer,vertex_indices_memory)={
-            let size=(vertex_indices.len() * std::mem::size_of::<VertexIndices>()) as u64;
+            let size=1;//(vertex_indices.len() * std::mem::size_of::<VertexIndices>()) as u64;
             let buffer_create_info=vk::BufferCreateInfo{
                 size:size,
                 usage:vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
@@ -336,13 +539,13 @@ impl Decoder{
                 ..Default::default()
             };
             let buffer=unsafe{
-                self.device.create_buffer(&buffer_create_info,self.get_allocation_callbacks())
+                self.vulkan.device.create_buffer(&buffer_create_info,self.vulkan.get_allocation_callbacks())
             }.unwrap();
 
             let mut memory=vk::DeviceMemory::null();
 
             let buffer_memory_requirements=unsafe{
-                self.device.get_buffer_memory_requirements(buffer)
+                self.vulkan.device.get_buffer_memory_requirements(buffer)
             };
 
             for memory_type_index in 0..self.device_memory_properties.memory_type_count{
@@ -355,21 +558,28 @@ impl Decoder{
                         ..Default::default()
                     };
                     memory=unsafe{
-                        self.device.allocate_memory(&memory_allocate_info,self.get_allocation_callbacks())
+                        self.vulkan.device.allocate_memory(&memory_allocate_info,self.vulkan.get_allocation_callbacks())
                     }.unwrap();
 
                     //bind
                     let buffer_memory_offset=0;
                     unsafe{
-                        self.device.bind_buffer_memory(buffer,memory,buffer_memory_offset)
+                        self.vulkan.device.bind_buffer_memory(buffer,memory,buffer_memory_offset)
                     }.unwrap();
 
-                    let offset=self.staging_buffer_in_use_size;
-                    self.staging_buffer_in_use_size+=buffer_memory_requirements.size;
+                    let mut staging_buffer=if let Some(sb)=self.staging_buffers.iter_mut().find(|sb|sb.size_left()>=size){
+                        sb
+                    }else{
+                        self.new_staging(size.next_power_of_two());
+                        let last_index=self.staging_buffers.len()-1;
+                        &mut self.staging_buffers[last_index]
+                    };
+                    let offset=staging_buffer.buffer_in_use_size;
+                    staging_buffer.buffer_in_use_size+=buffer_memory_requirements.size;
 
                     //map staging (!)
                     let memory_pointer=unsafe{
-                        self.device.map_memory(self.staging_buffer.memory,offset,size,vk::MemoryMapFlags::empty())
+                        self.vulkan.device.map_memory(staging_buffer.buffer.memory,offset,size,vk::MemoryMapFlags::empty())
                     }.unwrap();
 
                     //memcpy
@@ -379,23 +589,23 @@ impl Decoder{
 
                     //flush
                     let flush_range=vk::MappedMemoryRange{
-                        memory:self.staging_buffer.memory,
+                        memory:staging_buffer.buffer.memory,
                         offset,
                         //size,
                         size:vk::WHOLE_SIZE,
                         ..Default::default()
                     };
                     unsafe{
-                        self.device.flush_mapped_memory_ranges(&[flush_range])
+                        self.vulkan.device.flush_mapped_memory_ranges(&[flush_range])
                     }.unwrap();
 
                     //unmap
                     unsafe{
-                        self.device.unmap_memory(self.staging_buffer.memory);
+                        self.vulkan.device.unmap_memory(staging_buffer.buffer.memory);
                     }
 
                     unsafe{
-                        self.device.cmd_copy_buffer(command_buffer,self.staging_buffer.buffer,buffer,&[
+                        self.vulkan.device.cmd_copy_buffer(self.transfer_queue.command_buffers[0],staging_buffer.buffer.buffer,buffer,&[
                             vk::BufferCopy{
                                 src_offset:offset,
                                 dst_offset:0,
@@ -413,6 +623,7 @@ impl Decoder{
 
             (size,buffer,memory)
         };
+        /*
 
         let buffer_memory_barriers = vec![
             vk::BufferMemoryBarrier{
@@ -438,7 +649,7 @@ impl Decoder{
         ];
 
         unsafe{
-            self.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &buffer_memory_barriers[..], &[]);
+            self.vulkan.device.cmd_pipeline_barrier(self.transfer_queue.command_buffers[0], vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &buffer_memory_barriers[..], &[]);
         }
 
         let mesh=std::sync::Arc::new(Mesh{
@@ -459,10 +670,10 @@ impl Decoder{
         self.meshes.insert(name,mesh.clone());
 
         mesh
+        */
     }
 
-    #[cfg(disabled)]
-    pub fn new_staging(&mut self,size:u64)->IntegratedBuffer{
+    pub fn new_staging(&mut self,size:u64){
         let buffer_create_info=vk::BufferCreateInfo{
             size:size,
             usage:vk::BufferUsageFlags::TRANSFER_SRC,
@@ -470,13 +681,13 @@ impl Decoder{
             ..Default::default()
         };
         let buffer=unsafe{
-            self.device.create_buffer(&buffer_create_info,self.allocation_callbacks)
+            self.vulkan.device.create_buffer(&buffer_create_info,self.vulkan.get_allocation_callbacks())
         }.unwrap();
 
         let mut memory=vk::DeviceMemory::null();
 
         let buffer_memory_requirements=unsafe{
-            self.device.get_buffer_memory_requirements(buffer)
+            self.vulkan.device.get_buffer_memory_requirements(buffer)
         };
 
         for memory_type_index in 0..self.device_memory_properties.memory_type_count{
@@ -489,12 +700,12 @@ impl Decoder{
                     ..Default::default()
                 };
                 memory=unsafe{
-                    self.device.allocate_memory(&memory_allocate_info,self.allocation_callbacks)
+                    self.vulkan.device.allocate_memory(&memory_allocate_info,self.vulkan.get_allocation_callbacks())
                 }.unwrap();
                 //bind
                 let memory_offset=0;
                 unsafe{
-                    self.device.bind_buffer_memory(buffer,memory,memory_offset)
+                    self.vulkan.device.bind_buffer_memory(buffer,memory,memory_offset)
                 }.unwrap();
 
                 break;
@@ -504,11 +715,15 @@ impl Decoder{
             panic!("staging buffer has no memory")
         }
 
-        IntegratedBuffer{
-            size,
-            buffer,
-            memory,
-        }
+        self.staging_buffers.push(StagingBuffer{
+            buffer:IntegratedBuffer{
+                buffer_size:size,
+                item_count:size,
+                buffer,
+                memory,
+            },
+            buffer_in_use_size:0,
+        });
     }
 
     #[cfg(disabled)]
@@ -543,7 +758,7 @@ impl Decoder{
                 ..Default::default()
             };
             unsafe{
-                self.device.create_image(&image_create_info,self.get_allocation_callbacks()).unwrap()
+                self.vulkan.device.create_image(&image_create_info,self.get_allocation_callbacks()).unwrap()
             }
         };
 
@@ -552,7 +767,7 @@ impl Decoder{
         let mut memory=vk::DeviceMemory::null();
         {
             let image_memory_reqirements=unsafe{
-                self.device.get_image_memory_requirements(image)
+                self.vulkan.device.get_image_memory_requirements(image)
             };
             if self.staging_buffer.buffer_size<image_memory_reqirements.size{
                 panic!("staging buffer not big enough");
@@ -570,12 +785,12 @@ impl Decoder{
                     };
                     //allocate image memory
                     unsafe{
-                        memory=self.device.allocate_memory(&memory_allocate_info, self.get_allocation_callbacks()).unwrap()
+                        memory=self.vulkan.device.allocate_memory(&memory_allocate_info, self.get_allocation_callbacks()).unwrap()
                     }
                     
                     //bind memory to image handle
                     unsafe{
-                        self.device.bind_image_memory(image, memory, 0)
+                        self.vulkan.device.bind_image_memory(image, memory, 0)
                     }.unwrap();
 
                     let offset=self.staging_buffer_in_use_size;//offset mesh data because staging buffer is used mesh and texture upload, with no synchronization against each other (could do that, somehow?)
@@ -583,7 +798,7 @@ impl Decoder{
 
                     //map staging memory
                     let memory_pointer=unsafe{
-                        self.device.map_memory(self.staging_buffer.memory, offset, image_memory_reqirements.size, vk::MemoryMapFlags::empty())
+                        self.vulkan.device.map_memory(self.staging_buffer.memory, offset, image_memory_reqirements.size, vk::MemoryMapFlags::empty())
                     }.unwrap();
 
                     //copy image data to staging
@@ -599,8 +814,8 @@ impl Decoder{
                         ..Default::default()
                     };
                     unsafe{
-                        self.device.flush_mapped_memory_ranges(&[flush_range]).unwrap();
-                        self.device.unmap_memory(self.staging_buffer.memory);
+                        self.vulkan.device.flush_mapped_memory_ranges(&[flush_range]).unwrap();
+                        self.vulkan.device.unmap_memory(self.staging_buffer.memory);
                     }
 
                     //schedule image data transfer from staging to final
@@ -625,7 +840,7 @@ impl Decoder{
                     };
                     unsafe{
                         //perform buffer layout transition from copy target to vertex data source
-                        self.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_none_to_transfer]);
+                        self.vulkan.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_none_to_transfer]);
                     }
 
                     let buffer_image_copy_info=vk::BufferImageCopy{
@@ -651,7 +866,7 @@ impl Decoder{
                         ..Default::default()
                     };
                     unsafe{
-                        self.device.cmd_copy_buffer_to_image(command_buffer, self.staging_buffer.buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy_info]);
+                        self.vulkan.device.cmd_copy_buffer_to_image(command_buffer, self.staging_buffer.buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy_info]);
                     }
                     
                     let image_subresource_range=vk::ImageSubresourceRange{
@@ -673,7 +888,7 @@ impl Decoder{
                         ..Default::default()
                     };
                     unsafe{
-                        self.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_transfer_to_shader_read]);
+                        self.vulkan.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_transfer_to_shader_read]);
                     }
 
                     break;
@@ -707,7 +922,7 @@ impl Decoder{
                 ..Default::default()
             };
             unsafe{
-                self.device.create_image_view(&image_view_create_info,self.get_allocation_callbacks()).unwrap()
+                self.vulkan.device.create_image_view(&image_view_create_info,self.get_allocation_callbacks()).unwrap()
             }
         };
 
@@ -731,24 +946,24 @@ impl Drop for Decoder{
     fn drop(&mut self){
         for(_name,texture) in self.textures.iter(){
             unsafe{
-                self.device.destroy_image_view(texture.image_view,self.get_allocation_callbacks());
-                self.device.destroy_image(texture.image,self.get_allocation_callbacks());
-                self.device.free_memory(texture.memory,self.get_allocation_callbacks());
+                self.vulkan.device.destroy_image_view(texture.image_view,self.get_allocation_callbacks());
+                self.vulkan.device.destroy_image(texture.image,self.get_allocation_callbacks());
+                self.vulkan.device.free_memory(texture.memory,self.get_allocation_callbacks());
             }
         }
         for (_name,mesh) in self.meshes.iter(){
             unsafe{
-                self.device.free_memory(mesh.vertices.memory,self.get_allocation_callbacks());
-                self.device.destroy_buffer(mesh.vertices.buffer, self.get_allocation_callbacks());
+                self.vulkan.device.free_memory(mesh.vertices.memory,self.get_allocation_callbacks());
+                self.vulkan.device.destroy_buffer(mesh.vertices.buffer, self.get_allocation_callbacks());
 
-                self.device.free_memory(mesh.vertex_indices.memory,self.get_allocation_callbacks());
-                self.device.destroy_buffer(mesh.vertex_indices.buffer, self.get_allocation_callbacks());
+                self.vulkan.device.free_memory(mesh.vertex_indices.memory,self.get_allocation_callbacks());
+                self.vulkan.device.destroy_buffer(mesh.vertex_indices.buffer, self.get_allocation_callbacks());
             }
         }
 
         unsafe{
-            self.device.free_memory(self.staging_buffer.memory,self.get_allocation_callbacks());
-            self.device.destroy_buffer(self.staging_buffer.buffer, self.get_allocation_callbacks());
+            self.vulkan.device.free_memory(self.staging_buffer.memory,self.get_allocation_callbacks());
+            self.vulkan.device.destroy_buffer(self.staging_buffer.buffer, self.get_allocation_callbacks());
         }
 
     }
