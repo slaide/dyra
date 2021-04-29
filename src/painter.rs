@@ -393,6 +393,207 @@ impl RenderPass{
             rendering_done:vulkan.create_semaphore().unwrap(),
         }
     }
+
+    pub fn new_graphics_pipeline(&mut self,filename:&str){
+        //allocate descriptor pool
+        let descriptor_pool_sizes=vec![
+            vk::DescriptorPoolSize{
+                ty:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count:1,
+            }
+        ];
+        let descriptor_pool_create_info=vk::DescriptorPoolCreateInfo{
+            max_sets:8,
+            pool_size_count:descriptor_pool_sizes.len() as u32,
+            p_pool_sizes:descriptor_pool_sizes.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_pool=unsafe{
+            self.vulkan.device.create_descriptor_pool(&descriptor_pool_create_info,self.vulkan.get_allocation_callbacks())
+        }.unwrap();
+        //allocate layout
+        let descriptor_set_bindings=vec![
+            vk::DescriptorSetLayoutBinding{
+                binding:0,
+                descriptor_type:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count:1,
+                stage_flags:vk::ShaderStageFlags::FRAGMENT,
+                ..Default::default()
+            }
+        ];
+        let descriptor_set_layout=vk::DescriptorSetLayoutCreateInfo{
+            binding_count:descriptor_set_bindings.len() as u32,
+            p_bindings:descriptor_set_bindings.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_set_layout=unsafe{
+            self.vulkan.device.create_descriptor_set_layout(&descriptor_set_layout,self.vulkan.get_allocation_callbacks())
+        }.unwrap();
+
+        let set_layouts=vec![
+            descriptor_set_layout
+        ];
+        let push_constant_ranges=vec![];
+
+        let graphics_pipeline_layout_create_info=vk::PipelineLayoutCreateInfo{
+            set_layout_count:set_layouts.len() as u32,
+            p_set_layouts:set_layouts.as_ptr(),
+            push_constant_range_count:push_constant_ranges.len() as u32,
+            p_push_constant_ranges:push_constant_ranges.as_ptr(),
+            ..Default::default()
+        };
+        let graphics_pipeline_layout=unsafe{
+            self.vulkan.device.create_pipeline_layout(&graphics_pipeline_layout_create_info,self.vulkan.get_allocation_callbacks())
+        }.unwrap();
+
+        use std::io::Read;
+        
+        let mut shader_code=Vec::new();
+        let mut shader_file=std::fs::File::open("textured_polygon_2d.frag.spv").unwrap();
+        shader_file.read_to_end(&mut shader_code).unwrap();
+        let shader_module_create_info=vk::ShaderModuleCreateInfo{
+            code_size:shader_code.len(),
+            p_code:shader_code.as_ptr() as *const u32,
+            ..Default::default()
+        };
+        let fragment_shader=unsafe{
+            self.vulkan.device.create_shader_module(&shader_module_create_info,self.vulkan.get_allocation_callbacks())
+        }.unwrap();
+        
+        let mut shader_code=Vec::new();
+        let mut shader_file=std::fs::File::open("textured_polygon_2d.vert.spv").unwrap();
+        shader_file.read_to_end(&mut shader_code).unwrap();
+        let shader_module_create_info=vk::ShaderModuleCreateInfo{
+            code_size:shader_code.len(),
+            p_code:shader_code.as_ptr() as *const u32,
+            ..Default::default()
+        };
+        let vertex_shader=unsafe{
+            self.vulkan.device.create_shader_module(&shader_module_create_info,self.vulkan.get_allocation_callbacks())
+        }.unwrap();
+
+        let shader_stages=vec![
+            vk::PipelineShaderStageCreateInfo{
+                stage:vk::ShaderStageFlags::VERTEX,
+                module:vertex_shader,
+                p_name:"main\0".as_ptr() as *const i8,
+                ..Default::default()
+            },
+            vk::PipelineShaderStageCreateInfo{
+                stage:vk::ShaderStageFlags::FRAGMENT,
+                module:fragment_shader,
+                p_name:"main\0".as_ptr() as *const i8,
+                ..Default::default()
+            }
+        ];
+
+        let vertex_input_binding_descriptions=vec![];
+        let vertex_input_attribute_descriptions=vec![];
+        let vertex_input_state=vk::PipelineVertexInputStateCreateInfo{
+            vertex_binding_description_count:vertex_input_binding_descriptions.len() as u32,
+            p_vertex_binding_descriptions:vertex_input_binding_descriptions.as_ptr(),
+            vertex_attribute_description_count:vertex_input_attribute_descriptions.len() as u32,
+            p_vertex_attribute_descriptions:vertex_input_attribute_descriptions.as_ptr(),
+            ..Default::default()
+        };
+
+        let input_assembly_state_create_info=vk::PipelineInputAssemblyStateCreateInfo{
+            topology:vk::PrimitiveTopology::TRIANGLE_LIST,
+            primitive_restart_enable:false as u32,
+            ..Default::default()
+        };
+
+        let viewport_state_create_info=vk::PipelineViewportStateCreateInfo{
+            //intentionally blank. viewport and scissor are dynamic
+            ..Default::default()
+        };
+
+        let rasterization_state_create_info=vk::PipelineRasterizationStateCreateInfo{
+            depth_clamp_enable:false as u32,
+            rasterizer_discard_enable:true as u32,
+            polygon_mode:vk::PolygonMode::FILL,
+            cull_mode:vk::CullModeFlags::BACK,
+            front_face:vk::FrontFace::COUNTER_CLOCKWISE,
+            depth_bias_enable:false as u32,
+            line_width:1.0,//must not be 0.0, no matter polygon mode
+            ..Default::default()
+        };
+
+        let multisample_state_create_info=vk::PipelineMultisampleStateCreateInfo{
+            rasterization_samples:vk::SampleCountFlags::TYPE_1,
+            sample_shading_enable:false as u32,
+            min_sample_shading:1.0,//must be in [0,1] range, no matter sample shading enable value
+            alpha_to_coverage_enable:false as u32,
+            alpha_to_one_enable:false as u32,
+            ..Default::default()
+        };
+
+        let depth_stencil_state_create_info=vk::PipelineDepthStencilStateCreateInfo{
+            depth_test_enable:true as u32,
+            depth_write_enable:true as u32,
+            depth_compare_op:vk::CompareOp::LESS,
+            depth_bounds_test_enable:false as u32,
+            stencil_test_enable:false as u32,
+            ..Default::default()
+        };
+
+        let color_blend_attachment_states=vec![
+            vk::PipelineColorBlendAttachmentState{
+                blend_enable:false as u32,
+                color_write_mask:vk::ColorComponentFlags::all(),
+                ..Default::default()
+            }
+        ];
+        let color_blend_state_create_info=vk::PipelineColorBlendStateCreateInfo{
+            logic_op_enable:false as u32,
+            attachment_count:color_blend_attachment_states.len() as u32,
+            p_attachments:color_blend_attachment_states.as_ptr(),
+            blend_constants:[1.0,1.0,1.0,1.0],
+            ..Default::default()
+        };
+
+        let dynamic_states=vec![
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+        ];
+        let pipeline_dynamic_state_create_info=vk::PipelineDynamicStateCreateInfo{
+            dynamic_state_count:dynamic_states.len() as u32,
+            p_dynamic_states:dynamic_states.as_ptr(),
+            ..Default::default()
+        };
+
+        let graphics_pipeline_create_info=vk::GraphicsPipelineCreateInfo{
+            stage_count:shader_stages.len() as u32,
+            p_stages:shader_stages.as_ptr(),
+            p_vertex_input_state:&vertex_input_state,
+            p_input_assembly_state:&input_assembly_state_create_info,
+            p_viewport_state:&viewport_state_create_info,
+            p_rasterization_state:&rasterization_state_create_info,
+            p_multisample_state:&multisample_state_create_info,
+            p_depth_stencil_state:&depth_stencil_state_create_info,
+            p_color_blend_state:&color_blend_state_create_info,
+            p_dynamic_state:&pipeline_dynamic_state_create_info,
+            layout:graphics_pipeline_layout,
+            render_pass:self.render_pass,
+            subpass:0,
+            ..Default::default()
+        };
+        let graphics_pipelines=unsafe{
+            self.vulkan.device.create_graphics_pipelines(vk::PipelineCache::null(),&[graphics_pipeline_create_info],self.vulkan.get_allocation_callbacks())
+        }.unwrap();
+        let graphics_pipeline=graphics_pipelines[0];
+
+        let _=GraphicsPipeline{
+            layout:graphics_pipeline_layout,
+            pipeline:graphics_pipeline,
+        
+            vertex:vertex_shader,
+            fragment:fragment_shader,
+            
+            descriptor_pool,
+            descriptor_set_layout,
+        };
+    }
 }
 impl Drop for RenderPass{
     fn drop(&mut self){
@@ -598,45 +799,17 @@ impl Painter{
                     ..Default::default()
                 };
 
-                let fence_create_info=vk::FenceCreateInfo{
-                    ..Default::default()
-                };
-                let fence=unsafe{
-                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
-                }.unwrap();
                 unsafe{
-                    self.vulkan.device.queue_submit(self.graphics_queue.queue,&[submit_info],fence)
+                    self.vulkan.device.queue_submit(self.graphics_queue.queue,&[submit_info],vk::Fence::null())
                 }.unwrap();
-                unsafe{
-                    self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
-                }.unwrap();
-                println!("fence 1");
-                unsafe{
-                    self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
-                }
-            }
-                //TODO
                 //draw camera perspective to framebuffer
                     //TODO
+            }
                     
             //acquire swapchain image
-                let fence_create_info=vk::FenceCreateInfo{
-                    ..Default::default()
-                };
-                let fence=unsafe{
-                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
-                }.unwrap();
             let (image_index,suboptimal)=unsafe{
-                window_attachment.swapchain.acquire_next_image(window_attachment.swapchain_handle, u64::MAX, window_attachment.image_available, fence)
+                window_attachment.swapchain.acquire_next_image(window_attachment.swapchain_handle, u64::MAX, window_attachment.image_available, vk::Fence::null())
             }.unwrap();
-            unsafe{
-                self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
-            }.unwrap();
-            println!("fence 2");
-            unsafe{
-                self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
-            }
-
             //this means the swapchain should be recreated, but we dont care much right now
             if suboptimal{
                 println!("swapchain image acquired is suboptimal");
@@ -707,22 +880,9 @@ impl Painter{
                     p_signal_semaphores:signal_semaphores_1.as_ptr(),
                     ..Default::default()
                 };
-                let fence_create_info=vk::FenceCreateInfo{
-                    ..Default::default()
-                };
-                let fence=unsafe{
-                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
-                }.unwrap();
                 unsafe{
-                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],fence)
+                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],vk::Fence::null())
                 }.unwrap();
-                unsafe{
-                    self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
-                }.unwrap();
-                println!("fence 3");
-                unsafe{
-                    self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
-                }
             }
             //retrieve from present queue
             {
@@ -802,6 +962,11 @@ impl Painter{
                     window_attachment.image_transferable,
                     window_attachment.render_pass_2d.rendering_done
                 ];
+                let wait_dst_stage_masks=vec![
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                ];
+                assert!(wait_semaphores.len()==wait_dst_stage_masks.len());
                 let command_buffers=vec![
                     command_buffer
                 ];
@@ -811,29 +976,16 @@ impl Painter{
                 let submit_info=vk::SubmitInfo{
                     wait_semaphore_count:wait_semaphores.len() as u32,
                     p_wait_semaphores:wait_semaphores.as_ptr(),
-                    p_wait_dst_stage_mask:&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    p_wait_dst_stage_mask:wait_dst_stage_masks.as_ptr(),
                     command_buffer_count:command_buffers.len() as u32,
                     p_command_buffers:command_buffers.as_ptr(),
                     signal_semaphore_count:signal_semaphores.len() as u32,
                     p_signal_semaphores:signal_semaphores.as_ptr(),
                     ..Default::default()
                 };
-                let fence_create_info=vk::FenceCreateInfo{
-                    ..Default::default()
-                };
-                let fence=unsafe{
-                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
-                }.unwrap();
                 unsafe{
-                    self.vulkan.device.queue_submit(self.graphics_queue.queue,&[submit_info],fence)
+                    self.vulkan.device.queue_submit(self.graphics_queue.queue,&[submit_info],vk::Fence::null())
                 }.unwrap();
-                unsafe{
-                    self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
-                }.unwrap();
-                println!("fence 4");
-                unsafe{
-                    self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
-                }
             }
             //copy 3d image color attachment to swapchain image
             //copy 2d image color attachment to swapchain image
@@ -905,22 +1057,9 @@ impl Painter{
                     ..Default::default()
                 };
 
-                let fence_create_info=vk::FenceCreateInfo{
-                    ..Default::default()
-                };
-                let fence=unsafe{
-                    self.vulkan.device.create_fence(&fence_create_info,self.vulkan.get_allocation_callbacks())
-                }.unwrap();
                 unsafe{
-                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],fence)
+                    self.vulkan.device.queue_submit(self.present_queue.queue,&[submit_info_1],vk::Fence::null())
                 }.unwrap();
-                unsafe{
-                    self.vulkan.device.wait_for_fences(&[fence],true,u64::MAX)
-                }.unwrap();
-                println!("fence 5");
-                unsafe{
-                    self.vulkan.device.destroy_fence(fence,self.vulkan.get_allocation_callbacks());
-                }
             }
             //present swapchain image
             {
@@ -1405,6 +1544,7 @@ impl Painter{
         let image_available=self.vulkan.create_semaphore().unwrap();
         let image_transferable=self.vulkan.create_semaphore().unwrap();
         let image_presentable=self.vulkan.create_semaphore().unwrap();
+        let copy_done=self.vulkan.create_semaphore().unwrap();
 
         let surface_capabilities=unsafe{
             self.surface.get_physical_device_surface_capabilities(self.vulkan.physical_device, window.surface)
@@ -1565,7 +1705,7 @@ impl Painter{
             image_available,
             image_transferable,
             image_presentable,
-            copy_done:self.vulkan.create_semaphore().unwrap(),
+            copy_done,
             
             swapchain,
             swapchain_handle,
@@ -1597,6 +1737,7 @@ impl Painter{
             self.vulkan.device.destroy_semaphore(window_attachment.image_available, self.vulkan.get_allocation_callbacks());
             self.vulkan.device.destroy_semaphore(window_attachment.image_transferable, self.vulkan.get_allocation_callbacks());
             self.vulkan.device.destroy_semaphore(window_attachment.image_presentable, self.vulkan.get_allocation_callbacks());
+            self.vulkan.device.destroy_semaphore(window_attachment.copy_done, self.vulkan.get_allocation_callbacks());
             window_attachment.swapchain.destroy_swapchain(
                 window_attachment.swapchain_handle,
                 self.vulkan.get_allocation_callbacks()
