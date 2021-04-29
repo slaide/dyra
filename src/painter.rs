@@ -108,7 +108,7 @@ pub struct RenderPass{
     pub framebuffer:vk::Framebuffer,
 
     //shader stuff
-    pub pipelines:std::collections::HashMap<String,GraphicsPipeline>,
+    pub pipelines:std::collections::HashMap<String,std::rc::Rc<GraphicsPipeline>>,
 
     //rendering from this pass done
     pub rendering_done:vk::Semaphore,
@@ -167,7 +167,8 @@ impl RenderPass{
             }else{
                 vk::ImageTiling::LINEAR
             },
-            usage:vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            //render color to, and copy to swapchain
+            usage:vk::ImageUsageFlags::COLOR_ATTACHMENT|vk::ImageUsageFlags::TRANSFER_SRC,
             sharing_mode:vk::SharingMode::EXCLUSIVE,
             initial_layout:vk::ImageLayout::UNDEFINED,
             ..Default::default()
@@ -394,7 +395,11 @@ impl RenderPass{
         }
     }
 
-    pub fn new_graphics_pipeline(&mut self,filename:&str){
+    pub fn new_graphics_pipeline(&mut self,filename:&str)->std::rc::Rc<GraphicsPipeline>{
+        if let Some(pipeline)=self.pipelines.get(&String::from(filename)){
+            return pipeline.clone();
+        }
+
         //allocate descriptor pool
         let descriptor_pool_sizes=vec![
             vk::DescriptorPoolSize{
@@ -449,7 +454,7 @@ impl RenderPass{
         use std::io::Read;
         
         let mut shader_code=Vec::new();
-        let mut shader_file=std::fs::File::open("textured_polygon_2d.frag.spv").unwrap();
+        let mut shader_file=std::fs::File::open("untextured_polygon_2d.frag.spv").unwrap();
         shader_file.read_to_end(&mut shader_code).unwrap();
         let shader_module_create_info=vk::ShaderModuleCreateInfo{
             code_size:shader_code.len(),
@@ -461,7 +466,7 @@ impl RenderPass{
         }.unwrap();
         
         let mut shader_code=Vec::new();
-        let mut shader_file=std::fs::File::open("textured_polygon_2d.vert.spv").unwrap();
+        let mut shader_file=std::fs::File::open("untextured_polygon_2d.vert.spv").unwrap();
         shader_file.read_to_end(&mut shader_code).unwrap();
         let shader_module_create_info=vk::ShaderModuleCreateInfo{
             code_size:shader_code.len(),
@@ -487,8 +492,21 @@ impl RenderPass{
             }
         ];
 
-        let vertex_input_binding_descriptions=vec![];
-        let vertex_input_attribute_descriptions=vec![];
+        let vertex_input_binding_descriptions=vec![
+            vk::VertexInputBindingDescription{
+                binding:0,
+                stride:std::mem::size_of::<crate::Vertex>() as u32,
+                input_rate:vk::VertexInputRate::VERTEX,
+            }
+        ];
+        let vertex_input_attribute_descriptions=vec![
+            vk::VertexInputAttributeDescription{
+                location:0,
+                binding:vertex_input_binding_descriptions[0].binding,
+                format:vk::Format::R32G32B32A32_SFLOAT,
+                offset:0,
+            }
+        ];
         let vertex_input_state=vk::PipelineVertexInputStateCreateInfo{
             vertex_binding_description_count:vertex_input_binding_descriptions.len() as u32,
             p_vertex_binding_descriptions:vertex_input_binding_descriptions.as_ptr(),
@@ -583,7 +601,7 @@ impl RenderPass{
         }.unwrap();
         let graphics_pipeline=graphics_pipelines[0];
 
-        let _=GraphicsPipeline{
+        let pipeline=std::rc::Rc::new(GraphicsPipeline{
             layout:graphics_pipeline_layout,
             pipeline:graphics_pipeline,
         
@@ -592,21 +610,27 @@ impl RenderPass{
             
             descriptor_pool,
             descriptor_set_layout,
-        };
+        });
+
+        self.pipelines.insert(String::from(filename),pipeline.clone());
+
+        pipeline
     }
 }
 impl Drop for RenderPass{
     fn drop(&mut self){
         unsafe{
-            /*
-            for (key,pipeline) in self.pipelines.iter(){
-                self.device.destroy_pipeline(pipeline.pipeline, self.get_allocation_callbacks());
-                self.device.destroy_pipeline_layout(pipeline.layout, self.get_allocation_callbacks());
+            for (_,pipeline) in self.pipelines.iter(){
+                self.vulkan.device.destroy_pipeline(pipeline.pipeline, self.vulkan.get_allocation_callbacks());
+                self.vulkan.device.destroy_pipeline_layout(pipeline.layout, self.vulkan.get_allocation_callbacks());
                 
-                self.device.destroy_shader_module(pipeline.vertex,self.get_allocation_callbacks());
-                self.device.destroy_shader_module(pipeline.fragment,self.get_allocation_callbacks());
+                self.vulkan.device.destroy_shader_module(pipeline.vertex,self.vulkan.get_allocation_callbacks());
+                self.vulkan.device.destroy_shader_module(pipeline.fragment,self.vulkan.get_allocation_callbacks());
+
+                self.vulkan.device.destroy_descriptor_pool(pipeline.descriptor_pool,self.vulkan.get_allocation_callbacks());
+                self.vulkan.device.destroy_descriptor_set_layout(pipeline.descriptor_set_layout,self.vulkan.get_allocation_callbacks());
             }
-            */
+
             self.vulkan.device.destroy_semaphore(self.rendering_done,self.vulkan.get_allocation_callbacks());
 
             self.vulkan.device.destroy_framebuffer(self.framebuffer,self.vulkan.get_allocation_callbacks());
@@ -626,6 +650,8 @@ impl Drop for RenderPass{
 }
 
 pub struct WindowAttachments{
+    pub extent:vk::Extent2D,
+
     pub surface:vk::SurfaceKHR,
 
     pub image_available:vk::Semaphore,
@@ -747,7 +773,7 @@ impl Painter{
                 let clear_values=vec![
                     vk::ClearValue{
                         color:vk::ClearColorValue{
-                            float32:[1.0,0.5,0.5,1.0]
+                            float32:[1.0,0.5,0.5,0.5]
                         }
                     },
                     vk::ClearValue{
@@ -774,9 +800,70 @@ impl Painter{
                 unsafe{
                     self.vulkan.device.cmd_begin_render_pass(command_buffer,&render_pass_begin_info,vk::SubpassContents::INLINE)
                 };
+
+
+                //bind first pipeline, statically
+                unsafe{
+                    self.vulkan.device.cmd_bind_pipeline(command_buffer,vk::PipelineBindPoint::GRAPHICS,window_attachment.render_pass_2d.pipelines.iter().next().unwrap().1.pipeline);
+                }
+
+                let viewport=vk::Viewport{
+                    x:0.0,
+                    y:0.0,
+                    width:window_attachment.extent.width as f32,
+                    height:window_attachment.extent.height as f32,
+                    min_depth:0.0,
+                    max_depth:1.0,
+                };
+                let scissor=vk::Rect2D{
+                    offset:vk::Offset2D{
+                        x:0,
+                        y:0,  
+                    },
+                    extent:vk::Extent2D{
+                        width:window_attachment.extent.width,
+                        height:window_attachment.extent.height,
+                    }
+                };
+                unsafe{
+                    self.vulkan.device.cmd_set_viewport(command_buffer,0,&[viewport]);
+                    self.vulkan.device.cmd_set_scissor(command_buffer,0,&[scissor]);
+                }
+
                 unsafe{
                     self.vulkan.device.cmd_end_render_pass(command_buffer)
                 };
+
+                //transition image to source for copy to swapchain image
+                let image_memory_barrier=vk::ImageMemoryBarrier{
+                    src_access_mask:vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    dst_access_mask:vk::AccessFlags::TRANSFER_READ,
+                    old_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout:vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    src_queue_family_index:self.graphics_queue.family_index,
+                    dst_queue_family_index:self.graphics_queue.family_index,
+                    image:window_attachment.render_pass_2d.color_image,
+                    subresource_range:vk::ImageSubresourceRange{
+                        aspect_mask:vk::ImageAspectFlags::COLOR,
+                        base_mip_level:0,
+                        level_count:1,
+                        base_array_layer:0,
+                        layer_count:1,
+                    },
+                    ..Default::default()
+                };
+                unsafe{
+                    self.vulkan.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::ALL_COMMANDS, 
+                        vk::PipelineStageFlags::ALL_COMMANDS, 
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[image_memory_barrier]
+                    )
+                };
+
                 unsafe{
                     self.vulkan.device.end_command_buffer(command_buffer)
                 }.unwrap();
@@ -817,6 +904,7 @@ impl Painter{
             }
 
             let swapchain_image=window_attachment.swapchain_images[image_index as usize];
+
             //hand image over to graphics queue
             {
                 let command_buffer=self.present_queue.command_buffers[0];
@@ -926,6 +1014,47 @@ impl Painter{
                         &[image_memory_barrier_present_to_graphics]//image memory barriers
                     )
                 };
+
+                //copy renderpass image to swapchain
+                unsafe{
+                    let copy_range_offset_coordinates=[
+                        vk::Offset3D{
+                            x:0,
+                            y:0,
+                            z:0,
+                        },
+                        vk::Offset3D{
+                            x:window_attachment.extent.width as i32,
+                            y:window_attachment.extent.height as i32,
+                            z:1,
+                        }
+                    ];
+                    self.vulkan.device.cmd_blit_image(
+                        command_buffer,
+                        window_attachment.render_pass_2d.color_image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        swapchain_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::ImageBlit{
+                            src_subresource:vk::ImageSubresourceLayers{
+                                aspect_mask:vk::ImageAspectFlags::COLOR,
+                                mip_level:0,
+                                base_array_layer:0,
+                                layer_count:1
+                            },
+                            src_offsets:copy_range_offset_coordinates,
+                            dst_subresource:vk::ImageSubresourceLayers{
+                                aspect_mask:vk::ImageAspectFlags::COLOR,
+                                mip_level:0,
+                                base_array_layer:0,
+                                layer_count:1
+                            },
+                            dst_offsets:copy_range_offset_coordinates,
+                        }],
+                        vk::Filter::NEAREST,
+                    );
+                }
+
                 let image_memory_barrier_graphics_to_present=vk::ImageMemoryBarrier{
                     src_access_mask:vk::AccessFlags::TRANSFER_WRITE,
                     dst_access_mask:vk::AccessFlags::MEMORY_READ,
@@ -1700,6 +1829,8 @@ impl Painter{
         let render_pass_3d=RenderPass::new(&self.vulkan,&self.surface,&window);
 
         let window_attachment=WindowAttachments{
+            extent:swapchain_extent,
+            
             surface:window.surface,
         
             image_available,

@@ -1030,7 +1030,7 @@ impl Manager{
     pub fn run(&mut self){
         //let _=self.decoder.get_mesh("quad.do");
         //let _=self.decoder.get_mesh("bunny.do");
-        //self.painter.window_attachments.iter_mut().next().unwrap().1.render_pass_2d.new_graphics_pipeline("simple2dnontextured.dgp");
+        self.painter.window_attachments.iter_mut().next().unwrap().1.render_pass_2d.new_graphics_pipeline("simple2dnontextured.dgp");
 
         loop{
             if self.step()!=ControlFlow::Continue{
