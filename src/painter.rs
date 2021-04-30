@@ -436,7 +436,7 @@ impl RenderPass{
         }.unwrap();
 
         let set_layouts=vec![
-            descriptor_set_layout
+            //descriptor_set_layout
         ];
         let push_constant_ranges=vec![];
 
@@ -495,7 +495,7 @@ impl RenderPass{
         let vertex_input_binding_descriptions=vec![
             vk::VertexInputBindingDescription{
                 binding:0,
-                stride:std::mem::size_of::<crate::Vertex>() as u32,
+                stride:std::mem::size_of::<crate::decoder::VertexCoordinates>() as u32,
                 input_rate:vk::VertexInputRate::VERTEX,
             }
         ];
@@ -528,18 +528,18 @@ impl RenderPass{
 
         let rasterization_state_create_info=vk::PipelineRasterizationStateCreateInfo{
             depth_clamp_enable:false as u32,
-            rasterizer_discard_enable:true as u32,
+            rasterizer_discard_enable:false as u32,//why the fuck would you disable this?
             polygon_mode:vk::PolygonMode::FILL,
             cull_mode:vk::CullModeFlags::BACK,
             front_face:vk::FrontFace::COUNTER_CLOCKWISE,
             depth_bias_enable:false as u32,
-            line_width:1.0,//must not be 0.0, no matter polygon mode
+            line_width:1.0,//specs state this must be 1.0 if wide lines feature is not enabled
             ..Default::default()
         };
 
         let multisample_state_create_info=vk::PipelineMultisampleStateCreateInfo{
             rasterization_samples:vk::SampleCountFlags::TYPE_1,
-            sample_shading_enable:false as u32,
+            sample_shading_enable:true as u32,
             min_sample_shading:1.0,//must be in [0,1] range, no matter sample shading enable value
             alpha_to_coverage_enable:false as u32,
             alpha_to_one_enable:false as u32,
@@ -547,8 +547,8 @@ impl RenderPass{
         };
 
         let depth_stencil_state_create_info=vk::PipelineDepthStencilStateCreateInfo{
-            depth_test_enable:true as u32,
-            depth_write_enable:true as u32,
+            depth_test_enable:false as u32,
+            depth_write_enable:false as u32,
             depth_compare_op:vk::CompareOp::LESS,
             depth_bounds_test_enable:false as u32,
             stencil_test_enable:false as u32,
@@ -756,7 +756,7 @@ impl Painter{
 
     //wait for fence on start?
     //signal fence when done?
-    pub fn draw(&mut self)->crate::ControlFlow{
+    pub fn draw(&mut self,mesh:std::sync::Arc<crate::Mesh>)->crate::ControlFlow{
         let window_ids=self.window_attachments.keys();
         for id in window_ids{
             let window_attachment=self.window_attachments.get(id).unwrap();
@@ -773,7 +773,7 @@ impl Painter{
                 let clear_values=vec![
                     vk::ClearValue{
                         color:vk::ClearColorValue{
-                            float32:[1.0,0.5,0.5,0.5]
+                            float32:[0.9,0.5,0.2,1.0],
                         }
                     },
                     vk::ClearValue{
@@ -828,6 +828,12 @@ impl Painter{
                 unsafe{
                     self.vulkan.device.cmd_set_viewport(command_buffer,0,&[viewport]);
                     self.vulkan.device.cmd_set_scissor(command_buffer,0,&[scissor]);
+                }
+
+                unsafe{
+                    self.vulkan.device.cmd_bind_vertex_buffers(command_buffer,0,&[mesh.vertices.buffer],&[0]);
+                    self.vulkan.device.cmd_bind_index_buffer(command_buffer,mesh.vertex_indices.buffer,0,vk::IndexType::UINT16);
+                    self.vulkan.device.cmd_draw_indexed(command_buffer,mesh.vertex_indices.item_count as u32,1,0,0,0);
                 }
 
                 unsafe{

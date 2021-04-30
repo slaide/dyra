@@ -683,6 +683,10 @@ impl Manager{
             present_queue=queue.clone();
         };
 
+        let painter=Painter::new(&vulkan,&test_window,graphics_queue,present_queue);
+        let mut decoder=Decoder::new(&vulkan,transfer_queue);
+        decoder.new_staging(10*1024*1024);
+
         Self{
             window_manager_handle,
             next_window_id:0,
@@ -690,9 +694,9 @@ impl Manager{
 
             vulkan:vulkan.clone(),
 
-            painter:Painter::new(&vulkan,&test_window,graphics_queue,present_queue),
+            painter,
 
-            decoder:Decoder::new(&vulkan,transfer_queue),
+            decoder,
         }
     }
 
@@ -1018,7 +1022,8 @@ impl Manager{
             _=>panic!("unsupported")
         }
 
-        self.painter.draw();
+        let quad=self.decoder.get_mesh("quad.do");
+        self.painter.draw(quad);
 
         unsafe{
             self.vulkan.device.device_wait_idle()
@@ -1028,7 +1033,6 @@ impl Manager{
     }
 
     pub fn run(&mut self){
-        //let _=self.decoder.get_mesh("quad.do");
         //let _=self.decoder.get_mesh("bunny.do");
         self.painter.window_attachments.iter_mut().next().unwrap().1.render_pass_2d.new_graphics_pipeline("simple2dnontextured.dgp");
 

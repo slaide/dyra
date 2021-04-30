@@ -70,6 +70,7 @@ use ash::{
 use std::str::FromStr;
 
 #[derive(Debug,Clone)]
+#[repr(C)]
 pub struct VertexCoordinates{
     x:f32,
     y:f32,
@@ -77,23 +78,27 @@ pub struct VertexCoordinates{
     w:f32,
 }
 #[derive(Debug,Clone)]
+#[repr(C)]
 pub struct VertexTextureCoordinates{
     u:f32,
     v:f32,
     w:f32,
 }
 #[derive(Debug,Clone)]
+#[repr(C)]
 pub struct TexturedVertex{
     pub vertex_coordinates:VertexCoordinates,
     pub vertex_texture_coordinates:VertexTextureCoordinates,
 }
 #[derive(Debug,Clone)]
+#[repr(C)]
 pub struct Vertex{
     pub vertex_coordinates:VertexCoordinates,
 }
 
 //polygon face with indices of vertices in related vertex list
 #[derive(Debug,Clone,Copy)]
+#[repr(C)]
 pub struct Face{
     a:u16,
     b:u16,
@@ -101,6 +106,7 @@ pub struct Face{
 }
 
 #[derive(Debug,Clone)]
+#[repr(C)]
 pub enum VertexData{
     Textured(Vec<TexturedVertex>),
     Plain(Vec<Vertex>)
@@ -144,10 +150,10 @@ pub struct StagingBuffer{
 }
 impl StagingBuffer{
     pub fn size_left(&self)->u64{
+        println!("{} {}",self.buffer.buffer_size,self.buffer_in_use_size);
         self.buffer.buffer_size-self.buffer_in_use_size
     }
 }
-
 
 #[derive(Debug,Clone,Copy)]
 pub struct Image{
@@ -194,9 +200,9 @@ impl Decoder{
         }
     }
 
-    pub fn get_mesh(&mut self,name:&'static str){//->std::sync::Arc<Mesh>{
+    pub fn get_mesh(&mut self,name:&'static str)->std::sync::Arc<Mesh>{
         if let Some(mesh)=self.meshes.get(name){
-            //return mesh.clone();
+            return mesh.clone();
         }
 
         let (vertices,vertex_indices)={
@@ -477,9 +483,9 @@ impl Decoder{
                     let mut staging_buffer=if let Some(sb)=self.staging_buffers.iter_mut().find(|sb|sb.size_left()>=size){
                         sb
                     }else{
+                        println!("{} {}",size,size.next_power_of_two());
                         self.new_staging(size.next_power_of_two());
-                        let last_index=self.staging_buffers.len()-1;
-                        &mut self.staging_buffers[last_index]
+                        self.staging_buffers.last_mut().unwrap()
                     };
                     let offset=staging_buffer.buffer_in_use_size;
                     staging_buffer.buffer_in_use_size+=buffer_memory_requirements.size;
@@ -510,15 +516,42 @@ impl Decoder{
                         self.vulkan.device.unmap_memory(staging_buffer.buffer.memory);
                     }
 
+                    let command_buffer=self.transfer_queue.command_buffers[0];
+
+                    let begin_info=vk::CommandBufferBeginInfo{
+
+                        ..Default::default()
+                    };
+                    
+                    let wait_semaphores=vec![];
+                    let command_buffers=vec![
+                        command_buffer
+                    ];
+                    let signal_semaphores=vec![];
+                    let submit_info=vk::SubmitInfo{
+                        wait_semaphore_count:wait_semaphores.len() as u32,
+                        p_wait_semaphores:wait_semaphores.as_ptr(),
+                        p_wait_dst_stage_mask:&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        command_buffer_count:command_buffers.len() as u32,
+                        p_command_buffers:command_buffers.as_ptr(),
+                        signal_semaphore_count:signal_semaphores.len() as u32,
+                        p_signal_semaphores:signal_semaphores.as_ptr(),
+                        ..Default::default()
+                    };
+
                     unsafe{
-                        self.vulkan.device.cmd_copy_buffer(self.transfer_queue.command_buffers[0],staging_buffer.buffer.buffer,buffer,&[
+                        self.vulkan.device.begin_command_buffer(command_buffer,&begin_info).unwrap();
+                        self.vulkan.device.cmd_copy_buffer(command_buffer,staging_buffer.buffer.buffer,buffer,&[
                             vk::BufferCopy{
                                 src_offset:offset,
                                 dst_offset:0,
                                 size:size,
                             }
                         ]);
-                    };
+                        self.vulkan.device.end_command_buffer(command_buffer).unwrap();
+
+                        self.vulkan.device.queue_submit(self.transfer_queue.queue,&[submit_info],vk::Fence::null()).unwrap();
+                    }
 
                     break;
                 }
@@ -531,7 +564,7 @@ impl Decoder{
         };
 
         let (vertex_indices_size,vertex_indices_buffer,vertex_indices_memory)={
-            let size=1;//(vertex_indices.len() * std::mem::size_of::<VertexIndices>()) as u64;
+            let size=(vertex_indices.len() * std::mem::size_of::<Face>()) as u64;
             let buffer_create_info=vk::BufferCreateInfo{
                 size:size,
                 usage:vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
@@ -571,8 +604,7 @@ impl Decoder{
                         sb
                     }else{
                         self.new_staging(size.next_power_of_two());
-                        let last_index=self.staging_buffers.len()-1;
-                        &mut self.staging_buffers[last_index]
+                        self.staging_buffers.last_mut().unwrap()
                     };
                     let offset=staging_buffer.buffer_in_use_size;
                     staging_buffer.buffer_in_use_size+=buffer_memory_requirements.size;
@@ -604,15 +636,43 @@ impl Decoder{
                         self.vulkan.device.unmap_memory(staging_buffer.buffer.memory);
                     }
 
+                    let command_buffer=self.transfer_queue.command_buffers[0];
+
+                    let begin_info=vk::CommandBufferBeginInfo{
+
+                        ..Default::default()
+                    };
+                    
+                    let wait_semaphores=vec![];
+                    let command_buffers=vec![
+                        command_buffer
+                    ];
+                    let signal_semaphores=vec![];
+                    let submit_info=vk::SubmitInfo{
+                        wait_semaphore_count:wait_semaphores.len() as u32,
+                        p_wait_semaphores:wait_semaphores.as_ptr(),
+                        p_wait_dst_stage_mask:&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        command_buffer_count:command_buffers.len() as u32,
+                        p_command_buffers:command_buffers.as_ptr(),
+                        signal_semaphore_count:signal_semaphores.len() as u32,
+                        p_signal_semaphores:signal_semaphores.as_ptr(),
+                        ..Default::default()
+                    };
+
                     unsafe{
-                        self.vulkan.device.cmd_copy_buffer(self.transfer_queue.command_buffers[0],staging_buffer.buffer.buffer,buffer,&[
+                        self.vulkan.device.device_wait_idle().unwrap();
+                        self.vulkan.device.begin_command_buffer(command_buffer,&begin_info).unwrap();
+                        self.vulkan.device.cmd_copy_buffer(command_buffer,staging_buffer.buffer.buffer,buffer,&[
                             vk::BufferCopy{
                                 src_offset:offset,
                                 dst_offset:0,
                                 size:size,
                             }
                         ]);
-                    };
+                        self.vulkan.device.end_command_buffer(command_buffer).unwrap();
+                        
+                        self.vulkan.device.queue_submit(self.transfer_queue.queue,&[submit_info],vk::Fence::null()).unwrap();
+                    }
 
                     break;
                 }
@@ -623,7 +683,8 @@ impl Decoder{
 
             (size,buffer,memory)
         };
-        /*
+
+        println!("{:?} {:?}",&vertices,&vertex_indices);
 
         let buffer_memory_barriers = vec![
             vk::BufferMemoryBarrier{
@@ -649,7 +710,7 @@ impl Decoder{
         ];
 
         unsafe{
-            self.vulkan.device.cmd_pipeline_barrier(self.transfer_queue.command_buffers[0], vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &buffer_memory_barriers[..], &[]);
+            //self.vulkan.device.cmd_pipeline_barrier(self.transfer_queue.command_buffers[0], vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::VERTEX_INPUT, vk::DependencyFlags::empty(), &[], &buffer_memory_barriers[..], &[]);
         }
 
         let mesh=std::sync::Arc::new(Mesh{
@@ -670,7 +731,6 @@ impl Decoder{
         self.meshes.insert(name,mesh.clone());
 
         mesh
-        */
     }
 
     pub fn new_staging(&mut self,size:u64){
