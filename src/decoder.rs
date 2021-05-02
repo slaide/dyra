@@ -150,7 +150,6 @@ pub struct StagingBuffer{
 }
 impl StagingBuffer{
     pub fn size_left(&self)->u64{
-        println!("{} {}",self.buffer.buffer_size,self.buffer_in_use_size);
         self.buffer.buffer_size-self.buffer_in_use_size
     }
 }
@@ -212,7 +211,12 @@ impl Decoder{
 
             let mut lines=file_content.lines();
             let attribute=lines.next().unwrap();
-            assert!(attribute.unwrap()=="#settings");
+            assert!(attribute.unwrap()=="#version");
+
+            let version=lines.next().unwrap().unwrap().parse::<u32>().unwrap();
+            println!("parsing mesh of version {}",version);
+
+            assert!(lines.next().unwrap().unwrap()=="#settings");
 
             let line=lines.next().unwrap().unwrap();
             let mut line=line.split('=');
@@ -249,18 +253,6 @@ impl Decoder{
             let attribute=line.next().unwrap();
             assert!(attribute=="vertex_data_interleaved_input");
             let vertex_data_interleaved_input=line.next().unwrap()=="true";
-
-            let line=lines.next().unwrap().unwrap();
-            let mut line=line.split('=');
-            let attribute=line.next().unwrap();
-            assert!(attribute=="vertex_data_interleaved_output");
-            let vertex_data_interleaved_output=line.next().unwrap()=="true";
-
-            let line=lines.next().unwrap().unwrap();
-            let mut line=line.split('=');
-            let attribute=line.next().unwrap();
-            assert!(attribute=="material_location_external");
-            let material_location_external=line.next().unwrap()=="true";
 
             let line=lines.next().unwrap().unwrap();
             let mut line=line.split('=');
@@ -483,7 +475,6 @@ impl Decoder{
                     let mut staging_buffer=if let Some(sb)=self.staging_buffers.iter_mut().find(|sb|sb.size_left()>=size){
                         sb
                     }else{
-                        println!("{} {}",size,size.next_power_of_two());
                         self.new_staging(size.next_power_of_two());
                         self.staging_buffers.last_mut().unwrap()
                     };
@@ -683,8 +674,6 @@ impl Decoder{
 
             (size,buffer,memory)
         };
-
-        println!("{:?} {:?}",&vertices,&vertex_indices);
 
         let buffer_memory_barriers = vec![
             vk::BufferMemoryBarrier{

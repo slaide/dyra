@@ -70,6 +70,8 @@ use ash::{
 use crate::{Object};
 
 pub struct GraphicsPipeline{
+    set_bindings:Vec<Vec<vk::DescriptorSetLayoutBinding>>,
+
     layout:vk::PipelineLayout,
     pipeline:vk::Pipeline,
 
@@ -77,7 +79,7 @@ pub struct GraphicsPipeline{
     fragment:vk::ShaderModule,
     
     pub descriptor_pool:vk::DescriptorPool,
-    pub descriptor_set_layout:vk::DescriptorSetLayout,
+    pub descriptor_set_layouts:Vec<vk::DescriptorSetLayout>,
 }
 //data for a specific shader
 pub struct ShaderData{
@@ -108,7 +110,7 @@ pub struct RenderPass{
     pub framebuffer:vk::Framebuffer,
 
     //shader stuff
-    pub pipelines:std::collections::HashMap<String,std::rc::Rc<GraphicsPipeline>>,
+    pub pipelines:std::collections::HashMap<String,std::sync::Arc<GraphicsPipeline>>,
 
     //rendering from this pass done
     pub rendering_done:vk::Semaphore,
@@ -395,10 +397,109 @@ impl RenderPass{
         }
     }
 
-    pub fn new_graphics_pipeline(&mut self,filename:&str)->std::rc::Rc<GraphicsPipeline>{
+    pub fn new_graphics_pipeline(&mut self,filename:&str)->std::sync::Arc<GraphicsPipeline>{
         if let Some(pipeline)=self.pipelines.get(&String::from(filename)){
             return pipeline.clone();
         }
+
+        use std::io::BufRead;
+        let pipeline_file=std::fs::File::open(filename).unwrap();
+        let pipeline_file_content=std::io::BufReader::new(pipeline_file);
+
+        let mut lines=pipeline_file_content.lines();
+        let attribute=lines.next().unwrap();
+        assert!(attribute.unwrap()=="#version");
+
+        let version=lines.next().unwrap().unwrap().parse::<u32>().unwrap();
+        println!("parsing graphics pipeline of version {}",version);
+
+        assert!(lines.next().unwrap().unwrap()=="#settings");
+
+        let line=lines.next().unwrap().unwrap();
+        let mut line=line.split('=');
+        let attribute=line.next().unwrap();
+        assert!(attribute=="textured");
+        let textured=line.next().unwrap()=="true";
+
+        assert!(lines.next().unwrap().unwrap()=="#descriptor_set_pool");
+
+        let line=lines.next().unwrap().unwrap();
+        let mut line=line.split('=');
+        let attribute=line.next().unwrap();
+        assert!(attribute=="max_set_count");//max number of copies of all descriptor sets
+        let max_set_count=line.next().unwrap().parse::<u32>().unwrap();
+
+        let line=lines.next().unwrap().unwrap();
+        let mut line=line.split('=');
+        let attribute=line.next().unwrap();
+        assert!(attribute=="single_set_count");
+        let single_set_count=line.next().unwrap().parse::<u32>().unwrap();
+
+        assert!(lines.next().unwrap().unwrap()=="#vertex_shader");
+
+        let line=lines.next().unwrap().unwrap();
+        let mut line=line.split('=');
+        let attribute=line.next().unwrap();
+        assert!(attribute=="path");
+        let vertex_shader_path=line.next().unwrap();
+
+        let line=lines.next().unwrap().unwrap();
+        let mut line=line.split('=');
+        let attribute=line.next().unwrap();
+        assert!(attribute=="set_count");
+        let vertex_shader_set_count=line.next().unwrap().parse::<u32>().unwrap();
+
+        for i in 0..vertex_shader_set_count{
+            //TODO parse this
+        }
+
+        assert!(lines.next().unwrap().unwrap()=="#fragment_shader");
+
+        let line=lines.next().unwrap().unwrap();
+        let mut line=line.split('=');
+        let attribute=line.next().unwrap();
+        assert!(attribute=="path");
+        let fragment_shader_path=line.next().unwrap();
+
+        let line=lines.next().unwrap().unwrap();
+        let mut line=line.split('=');
+        let attribute=line.next().unwrap();
+        assert!(attribute=="set_count");
+        let fragment_shader_set_count=line.next().unwrap().parse::<u32>().unwrap();
+
+        for i in 0..fragment_shader_set_count{
+            //TODO parse this
+            /*
+            #fragment_shader_descriptor_set.0
+            set_index=0
+            binding_count=1
+            binding.0=combined_image_sampler
+            */
+        }
+
+
+        //create layout
+        let set_bindings=vec![
+            vec![
+                vk::DescriptorSetLayoutBinding{
+                    binding:0,//position of this descriptor in set
+                    descriptor_type:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    descriptor_count:1,//represented in shader as array of this length
+                    stage_flags:vk::ShaderStageFlags::FRAGMENT,
+                    ..Default::default()
+                }
+            ]
+        ];
+        let descriptor_set_layout_create_info=vk::DescriptorSetLayoutCreateInfo{
+            binding_count:set_bindings[0].len() as u32,
+            p_bindings:set_bindings[0].as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_set_layouts=vec![
+            unsafe{
+                self.vulkan.device.create_descriptor_set_layout(&descriptor_set_layout_create_info,self.vulkan.get_allocation_callbacks())
+            }.unwrap()
+        ];
 
         //allocate descriptor pool
         let descriptor_pool_sizes=vec![
@@ -408,7 +509,7 @@ impl RenderPass{
             }
         ];
         let descriptor_pool_create_info=vk::DescriptorPoolCreateInfo{
-            max_sets:8,
+            max_sets:max_set_count,
             pool_size_count:descriptor_pool_sizes.len() as u32,
             p_pool_sizes:descriptor_pool_sizes.as_ptr(),
             ..Default::default()
@@ -416,33 +517,12 @@ impl RenderPass{
         let descriptor_pool=unsafe{
             self.vulkan.device.create_descriptor_pool(&descriptor_pool_create_info,self.vulkan.get_allocation_callbacks())
         }.unwrap();
-        //allocate layout
-        let descriptor_set_bindings=vec![
-            vk::DescriptorSetLayoutBinding{
-                binding:0,
-                descriptor_type:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count:1,
-                stage_flags:vk::ShaderStageFlags::FRAGMENT,
-                ..Default::default()
-            }
-        ];
-        let descriptor_set_layout=vk::DescriptorSetLayoutCreateInfo{
-            binding_count:descriptor_set_bindings.len() as u32,
-            p_bindings:descriptor_set_bindings.as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_set_layout=unsafe{
-            self.vulkan.device.create_descriptor_set_layout(&descriptor_set_layout,self.vulkan.get_allocation_callbacks())
-        }.unwrap();
 
-        let set_layouts=vec![
-            //descriptor_set_layout
-        ];
         let push_constant_ranges=vec![];
 
         let graphics_pipeline_layout_create_info=vk::PipelineLayoutCreateInfo{
-            set_layout_count:set_layouts.len() as u32,
-            p_set_layouts:set_layouts.as_ptr(),
+            set_layout_count:descriptor_set_layouts.len() as u32,
+            p_set_layouts:descriptor_set_layouts.as_ptr(),
             push_constant_range_count:push_constant_ranges.len() as u32,
             p_push_constant_ranges:push_constant_ranges.as_ptr(),
             ..Default::default()
@@ -454,19 +534,7 @@ impl RenderPass{
         use std::io::Read;
         
         let mut shader_code=Vec::new();
-        let mut shader_file=std::fs::File::open("untextured_polygon_2d.frag.spv").unwrap();
-        shader_file.read_to_end(&mut shader_code).unwrap();
-        let shader_module_create_info=vk::ShaderModuleCreateInfo{
-            code_size:shader_code.len(),
-            p_code:shader_code.as_ptr() as *const u32,
-            ..Default::default()
-        };
-        let fragment_shader=unsafe{
-            self.vulkan.device.create_shader_module(&shader_module_create_info,self.vulkan.get_allocation_callbacks())
-        }.unwrap();
-        
-        let mut shader_code=Vec::new();
-        let mut shader_file=std::fs::File::open("untextured_polygon_2d.vert.spv").unwrap();
+        let mut shader_file=std::fs::File::open(vertex_shader_path).unwrap();
         shader_file.read_to_end(&mut shader_code).unwrap();
         let shader_module_create_info=vk::ShaderModuleCreateInfo{
             code_size:shader_code.len(),
@@ -474,6 +542,18 @@ impl RenderPass{
             ..Default::default()
         };
         let vertex_shader=unsafe{
+            self.vulkan.device.create_shader_module(&shader_module_create_info,self.vulkan.get_allocation_callbacks())
+        }.unwrap();
+        
+        let mut shader_code=Vec::new();
+        let mut shader_file=std::fs::File::open(fragment_shader_path).unwrap();
+        shader_file.read_to_end(&mut shader_code).unwrap();
+        let shader_module_create_info=vk::ShaderModuleCreateInfo{
+            code_size:shader_code.len(),
+            p_code:shader_code.as_ptr() as *const u32,
+            ..Default::default()
+        };
+        let fragment_shader=unsafe{
             self.vulkan.device.create_shader_module(&shader_module_create_info,self.vulkan.get_allocation_callbacks())
         }.unwrap();
 
@@ -492,21 +572,49 @@ impl RenderPass{
             }
         ];
 
-        let vertex_input_binding_descriptions=vec![
-            vk::VertexInputBindingDescription{
-                binding:0,
-                stride:std::mem::size_of::<crate::decoder::VertexCoordinates>() as u32,
-                input_rate:vk::VertexInputRate::VERTEX,
-            }
-        ];
-        let vertex_input_attribute_descriptions=vec![
-            vk::VertexInputAttributeDescription{
-                location:0,
-                binding:vertex_input_binding_descriptions[0].binding,
-                format:vk::Format::R32G32B32A32_SFLOAT,
-                offset:0,
-            }
-        ];
+        let vertex_input_binding_descriptions=if textured{
+            vec![
+                vk::VertexInputBindingDescription{
+                    binding:0,
+                    stride:std::mem::size_of::<crate::decoder::TexturedVertex>() as u32,
+                    input_rate:vk::VertexInputRate::VERTEX,
+                }
+            ]
+        }else{
+            vec![
+                vk::VertexInputBindingDescription{
+                    binding:0,
+                    stride:std::mem::size_of::<crate::decoder::Vertex>() as u32,
+                    input_rate:vk::VertexInputRate::VERTEX,
+                }
+            ]
+        };
+
+        let vertex_input_attribute_descriptions=if textured{
+            vec![
+                vk::VertexInputAttributeDescription{
+                    location:0,
+                    binding:vertex_input_binding_descriptions[0].binding,
+                    format:vk::Format::R32G32B32A32_SFLOAT,//space position
+                    offset:0,
+                },
+                vk::VertexInputAttributeDescription{
+                    location:1,
+                    binding:vertex_input_binding_descriptions[0].binding,
+                    format:vk::Format::R32G32B32_SFLOAT,//texture position
+                    offset:0,
+                }
+            ]
+        }else{
+            vec![
+                vk::VertexInputAttributeDescription{
+                    location:0,
+                    binding:vertex_input_binding_descriptions[0].binding,
+                    format:vk::Format::R32G32B32A32_SFLOAT,//space position
+                    offset:0,
+                }
+            ]
+        };
         let vertex_input_state=vk::PipelineVertexInputStateCreateInfo{
             vertex_binding_description_count:vertex_input_binding_descriptions.len() as u32,
             p_vertex_binding_descriptions:vertex_input_binding_descriptions.as_ptr(),
@@ -523,6 +631,8 @@ impl RenderPass{
 
         let viewport_state_create_info=vk::PipelineViewportStateCreateInfo{
             //intentionally blank. viewport and scissor are dynamic
+            viewport_count:1,
+            scissor_count:1,
             ..Default::default()
         };
 
@@ -539,7 +649,7 @@ impl RenderPass{
 
         let multisample_state_create_info=vk::PipelineMultisampleStateCreateInfo{
             rasterization_samples:vk::SampleCountFlags::TYPE_1,
-            sample_shading_enable:true as u32,
+            sample_shading_enable:false as u32,
             min_sample_shading:1.0,//must be in [0,1] range, no matter sample shading enable value
             alpha_to_coverage_enable:false as u32,
             alpha_to_one_enable:false as u32,
@@ -558,7 +668,7 @@ impl RenderPass{
         let color_blend_attachment_states=vec![
             vk::PipelineColorBlendAttachmentState{
                 blend_enable:false as u32,
-                color_write_mask:vk::ColorComponentFlags::all(),
+                color_write_mask:vk::ColorComponentFlags::all(),//do not mix colors, just forward input (and use all of its color channels)
                 ..Default::default()
             }
         ];
@@ -601,7 +711,9 @@ impl RenderPass{
         }.unwrap();
         let graphics_pipeline=graphics_pipelines[0];
 
-        let pipeline=std::rc::Rc::new(GraphicsPipeline{
+        let pipeline=std::sync::Arc::new(GraphicsPipeline{
+            set_bindings,
+
             layout:graphics_pipeline_layout,
             pipeline:graphics_pipeline,
         
@@ -609,7 +721,7 @@ impl RenderPass{
             fragment:fragment_shader,
             
             descriptor_pool,
-            descriptor_set_layout,
+            descriptor_set_layouts,
         });
 
         self.pipelines.insert(String::from(filename),pipeline.clone());
@@ -628,7 +740,9 @@ impl Drop for RenderPass{
                 self.vulkan.device.destroy_shader_module(pipeline.fragment,self.vulkan.get_allocation_callbacks());
 
                 self.vulkan.device.destroy_descriptor_pool(pipeline.descriptor_pool,self.vulkan.get_allocation_callbacks());
-                self.vulkan.device.destroy_descriptor_set_layout(pipeline.descriptor_set_layout,self.vulkan.get_allocation_callbacks());
+                for descriptor_set_layout in pipeline.descriptor_set_layouts.iter(){
+                    self.vulkan.device.destroy_descriptor_set_layout(*descriptor_set_layout,self.vulkan.get_allocation_callbacks());
+                }
             }
 
             self.vulkan.device.destroy_semaphore(self.rendering_done,self.vulkan.get_allocation_callbacks());
@@ -756,7 +870,8 @@ impl Painter{
 
     //wait for fence on start?
     //signal fence when done?
-    pub fn draw(&mut self,mesh:std::sync::Arc<crate::Mesh>)->crate::ControlFlow{
+    //pub fn draw(&mut self,mesh:std::sync::Arc<crate::Mesh>)->crate::ControlFlow{
+    pub fn draw(&mut self,scene:&crate::Scene)->crate::ControlFlow{
         let window_ids=self.window_attachments.keys();
         for id in window_ids{
             let window_attachment=self.window_attachments.get(id).unwrap();
@@ -831,9 +946,9 @@ impl Painter{
                 }
 
                 unsafe{
-                    self.vulkan.device.cmd_bind_vertex_buffers(command_buffer,0,&[mesh.vertices.buffer],&[0]);
-                    self.vulkan.device.cmd_bind_index_buffer(command_buffer,mesh.vertex_indices.buffer,0,vk::IndexType::UINT16);
-                    self.vulkan.device.cmd_draw_indexed(command_buffer,mesh.vertex_indices.item_count as u32,1,0,0,0);
+                    self.vulkan.device.cmd_bind_vertex_buffers(command_buffer,0,&[scene.objects[0].mesh.vertices.buffer],&[0]);
+                    self.vulkan.device.cmd_bind_index_buffer(command_buffer,scene.objects[0].mesh.vertex_indices.buffer,0,vk::IndexType::UINT16);
+                    self.vulkan.device.cmd_draw_indexed(command_buffer,scene.objects[0].mesh.vertex_indices.item_count as u32,1,0,0,0);
                 }
 
                 unsafe{
@@ -1326,26 +1441,7 @@ impl Painter{
         let target=glm::vec3(0.0,-1.0,0.0);
         let view=glm::look_at(&eye,&target,&glm::vec3(0.0,1.0,0.0));
 
-        let (scale_x,scale_y,scale_z)=(0.25,0.25,0.25);
-        let (rotate_x,rotate_y,rotate_z)=(180.0,170.0,0.0);
-        let (translate_x,translate_y,translate_z)=(0.0,0.0,0.0);
-
-        let model=glm::translate(
-            &glm::scale(
-                &glm::rotate_x(
-                    &glm::rotate_y(            
-                        &glm::rotate_z(
-                            &glm::identity::<f32,4>(),
-                            glm::radians(&glm::vec1(rotate_z)).x,
-                        ),
-                        glm::radians(&glm::vec1(rotate_y)).x,
-                    ),
-                    glm::radians(&glm::vec1(rotate_x)).x,
-                ),
-                &glm::vec3(scale_x,scale_y,scale_z)
-            ),
-            &glm::vec3(translate_x,translate_y,translate_z)
-        );
+        let model=object.transform.model_matrix();
 
         let projection=glm::perspective_fov(
             glm::radians(&glm::vec1(80.0)).x,

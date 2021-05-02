@@ -152,16 +152,76 @@ impl Drop for VulkanBase{
     }
 }
 
+pub struct Transform{
+    pub position:glm::Vec3,
+    pub rotation:glm::Vec3,//rotation around x,y,z axis
+    pub scale:glm::Vec3,//scale in x,y,z direction
+}
+impl Transform{
+    pub fn model_matrix(&self)->glm::Mat4{
+        glm::translate(
+            &glm::scale(
+                &glm::rotate_x(
+                    &glm::rotate_y(            
+                        &glm::rotate_z(
+                            &glm::identity::<f32,4>(),
+                            glm::radians(&glm::vec1(self.rotation.z)).x,
+                        ),
+                        glm::radians(&glm::vec1(self.rotation.y)).x,
+                    ),
+                    glm::radians(&glm::vec1(self.rotation.x)).x,
+                ),
+                &self.scale
+            ),
+            &self.position
+        )
+    }
+}
+
+
+enum Binding{
+    CombinedImageSampler{filename:String}
+}
+struct SetBinding{
+    set_binding:u32,
+    binding:Binding,
+}
+struct DescriptorSet{
+    set:u32,
+    set_bindings:Vec<SetBinding>,
+}
+
+struct PushConstantRange{}
+
+pub struct Material{
+    pipeline:std::sync::Arc<painter::GraphicsPipeline>,
+    descriptor_sets:Vec<DescriptorSet>,
+    push_constant_ranges:Vec<PushConstantRange>,
+}
+
 pub struct Object{
+    pub transform:Transform,
+
     pub mesh:std::sync::Arc<Mesh>,
-    pub texture:std::sync::Arc<Image>,
+
+    pub material:std::sync::Arc<Material>,
+}
+pub struct Scene{
+    objects:Vec<Object>,
+}
+impl Scene{
+    pub fn new()->Self{
+        Self{
+            objects:Vec::new(),
+        }
+    }
 }
 
 pub struct Queue{
     vulkan:std::sync::Arc<VulkanBase>,
     queue:vk::Queue,
     family_index:u32,
-    command_pool:std::rc::Rc<vk::CommandPool>,
+    command_pool:std::sync::Arc<vk::CommandPool>,
     command_buffers:Vec<vk::CommandBuffer>,
 }
 impl Queue{
@@ -197,7 +257,7 @@ impl Clone for Queue{
 }
 impl Drop for Queue{
     fn drop(&mut self){
-        if std::rc::Rc::strong_count(&self.command_pool)==1{
+        if std::sync::Arc::strong_count(&self.command_pool)==1{
             unsafe{
                 self.vulkan.device.destroy_command_pool(*self.command_pool, self.vulkan.get_allocation_callbacks());
             }
@@ -341,6 +401,8 @@ struct Manager{
 
     painter:Painter,
     decoder:Decoder,
+
+    scene:Scene,
 }
 impl Manager{
     pub fn new()->Self{
@@ -604,7 +666,7 @@ impl Manager{
                 vulkan:vulkan.clone(),
                 queue,
                 family_index:present_queue_family_index,
-                command_pool:std::rc::Rc::new(command_pool),
+                command_pool:std::sync::Arc::new(command_pool),
                 command_buffers:Vec::new(),
             };
             
@@ -629,7 +691,7 @@ impl Manager{
                 vulkan:vulkan.clone(),
                 queue,
                 family_index:transfer_queue_family_index,
-                command_pool:std::rc::Rc::new(command_pool),
+                command_pool:std::sync::Arc::new(command_pool),
                 command_buffers:Vec::new(),
             };
             
@@ -654,7 +716,7 @@ impl Manager{
                 vulkan:vulkan.clone(),
                 queue,
                 family_index:graphics_queue_family_index,
-                command_pool:std::rc::Rc::new(command_pool),
+                command_pool:std::sync::Arc::new(command_pool),
                 command_buffers:Vec::new(),
             };
         }else{
@@ -674,7 +736,7 @@ impl Manager{
                 vulkan:vulkan.clone(),
                 queue,
                 family_index:0,
-                command_pool:std::rc::Rc::new(command_pool),
+                command_pool:std::sync::Arc::new(command_pool),
                 command_buffers:Vec::new(),
             };
 
@@ -695,8 +757,9 @@ impl Manager{
             vulkan:vulkan.clone(),
 
             painter,
-
             decoder,
+
+            scene:Scene::new(),
         }
     }
 
@@ -1022,8 +1085,11 @@ impl Manager{
             _=>panic!("unsupported")
         }
 
-        let quad=self.decoder.get_mesh("quad.do");
-        self.painter.draw(quad);
+        if self.scene.objects.len()==0{
+            let quad=self.get_object("resources/objects/quad.do","resources/materials/untextured2dquad.dm");
+            self.scene.objects.push(quad);
+        }
+        self.painter.draw(&self.scene);
 
         unsafe{
             self.vulkan.device.device_wait_idle()
@@ -1034,7 +1100,7 @@ impl Manager{
 
     pub fn run(&mut self){
         //let _=self.decoder.get_mesh("bunny.do");
-        self.painter.window_attachments.iter_mut().next().unwrap().1.render_pass_2d.new_graphics_pipeline("simple2dnontextured.dgp");
+        //self.painter.window_attachments.iter_mut().next().unwrap().1.render_pass_2d.new_graphics_pipeline("simple2dnontextured.dgp");
 
         loop{
             if self.step()!=ControlFlow::Continue{
@@ -1044,6 +1110,104 @@ impl Manager{
             //cap framerate
             let max_fps=5;
             std::thread::sleep(std::time::Duration::from_millis(1000/max_fps));
+        }
+    }
+
+    pub fn get_object(&mut self, mesh_filename:&'static str,material_filename:&'static str)->Object{
+        let mesh=self.decoder.get_mesh(mesh_filename);
+
+        use std::io::BufRead;
+        let material_file=std::fs::File::open(material_filename).unwrap();
+        let material_file_content=std::io::BufReader::new(material_file);
+
+        let mut lines=material_file_content.lines();
+
+        assert!(lines.next().unwrap().unwrap()=="#version");
+        let version=lines.next().unwrap().unwrap().parse::<u32>().unwrap();
+
+        assert!(lines.next().unwrap().unwrap()=="#settings");
+
+        let graphics_pipeline_line=lines.next().unwrap().unwrap();
+        let mut graphics_pipeline_line=graphics_pipeline_line.split('=');
+        let graphics_pipeline_attribute_name=graphics_pipeline_line.next().unwrap();
+        assert!(graphics_pipeline_attribute_name=="graphics_pipeline");
+        let graphics_pipeline_filename=graphics_pipeline_line.next().unwrap();
+
+        let graphics_pipeline=self.painter.window_attachments.iter_mut().next().unwrap().1.render_pass_2d.new_graphics_pipeline(graphics_pipeline_filename);
+
+        let set_count_line=lines.next().unwrap().unwrap();
+        let mut set_count_line=set_count_line.split('=');
+        let set_count_attribute_name=set_count_line.next().unwrap();
+        assert!(set_count_attribute_name=="set_count");
+        let set_count=set_count_line.next().unwrap().parse::<u32>().unwrap();
+
+        let range_count_line=lines.next().unwrap().unwrap();
+        let mut range_count_line=range_count_line.split('=');
+        let range_count_attribute_name=range_count_line.next().unwrap();
+        assert!(range_count_attribute_name=="range_count");
+        let range_count=range_count_line.next().unwrap().parse::<u32>().unwrap();
+
+        let mut descriptor_sets=Vec::with_capacity(set_count as usize);
+        let push_constant_ranges:Vec<PushConstantRange>=Vec::with_capacity(range_count as usize);
+
+        for set_index in 0..set_count{
+            let line=lines.next().unwrap().unwrap();
+            let mut set_head_line=line.split('.');
+            let set_head_attribute_name=set_head_line.next().unwrap();
+            assert!(set_head_attribute_name=="#set");
+            assert!(set_head_line.next().unwrap().parse::<u32>().unwrap()==set_index);
+
+            let binding_count_line=lines.next().unwrap().unwrap();
+            let mut binding_count_line=binding_count_line.split('=');
+            let binding_count_attribute_name=binding_count_line.next().unwrap();
+            assert!(binding_count_attribute_name=="binding_count");
+            let binding_count=binding_count_line.next().unwrap().parse::<u32>().unwrap();
+
+            descriptor_sets.push(DescriptorSet{
+                set:set_index,
+                set_bindings:Vec::with_capacity(binding_count as usize)
+            });
+
+            for binding_index in 0..binding_count{
+                let binding_line=lines.next().unwrap().unwrap();
+                let mut binding_line=binding_line.split('=');
+                let mut binding_attribute_name=binding_line.next().unwrap().split('.');
+                assert!(binding_attribute_name.next().unwrap()=="binding");
+                assert!(binding_attribute_name.next().unwrap().parse::<u32>().unwrap()==binding_index);
+                let mut binding_values=binding_line.next().unwrap().split(' ');
+
+                let binding_type=binding_values.next().unwrap();
+                descriptor_sets[set_index as usize].set_bindings.push(match binding_type{
+                    "combined_image_sampler"=>{
+                        let filename=String::from(binding_values.next().unwrap());
+                        println!("{}",filename);
+                        SetBinding{
+                            set_binding:binding_index,
+                            binding:Binding::CombinedImageSampler{
+                                filename,
+                            }
+                        }
+                    },
+                    _=>unreachable!()
+                });
+            }
+        }
+        for range_index in 0..range_count{
+
+        }
+
+        Object{
+            transform:Transform{
+                position:glm::vec3(0.0,0.0,0.0),
+                rotation:glm::vec3(0.0,0.0,0.0),
+                scale:glm::vec3(1.0,1.0,1.0)
+            },
+            mesh,
+            material:std::sync::Arc::<Material>::new(Material{
+                pipeline:graphics_pipeline,
+                descriptor_sets,
+                push_constant_ranges,
+            })
         }
     }
 }
