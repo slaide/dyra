@@ -72,17 +72,17 @@ use std::str::FromStr;
 #[derive(Debug,Clone)]
 #[repr(C)]
 pub struct VertexCoordinates{
-    x:f32,
-    y:f32,
-    z:f32,
-    w:f32,
+    pub x:f32,
+    pub y:f32,
+    pub z:f32,
+    pub w:f32,
 }
 #[derive(Debug,Clone)]
 #[repr(C)]
 pub struct VertexTextureCoordinates{
-    u:f32,
-    v:f32,
-    w:f32,
+    pub u:f32,
+    pub v:f32,
+    pub w:f32,
 }
 #[derive(Debug,Clone)]
 #[repr(C)]
@@ -162,6 +162,7 @@ pub struct Image{
     pub memory:vk::DeviceMemory,
     pub image:vk::Image,
     pub image_view:vk::ImageView,
+    pub layout:vk::ImageLayout,
 }
 pub struct Decoder{
     pub vulkan:std::sync::Arc<crate::VulkanBase>,
@@ -174,7 +175,7 @@ pub struct Decoder{
 
     pub meshes:std::collections::HashMap<&'static str,std::sync::Arc<Mesh>>,
 
-    pub textures:std::collections::HashMap<&'static str,std::sync::Arc<Image>>,
+    pub textures:std::collections::HashMap<String,std::sync::Arc<Image>>,
 }
 impl Decoder{
     pub fn new(vulkan:&std::sync::Arc<crate::VulkanBase>,transfer_queue:crate::Queue)->Self{
@@ -775,8 +776,7 @@ impl Decoder{
         });
     }
 
-    #[cfg(disabled)]
-    pub fn get_texture(&mut self,filename:&'static str,command_buffer:vk::CommandBuffer)->std::sync::Arc<Image>{
+    pub fn get_texture(&mut self,filename:&String,command_buffer:vk::CommandBuffer)->std::sync::Arc<Image>{
         //return cached texture if present
         if let Some(texture)=self.textures.get(filename){
             return texture.clone();
@@ -807,7 +807,7 @@ impl Decoder{
                 ..Default::default()
             };
             unsafe{
-                self.vulkan.device.create_image(&image_create_info,self.get_allocation_callbacks()).unwrap()
+                self.vulkan.device.create_image(&image_create_info,self.vulkan.get_allocation_callbacks()).unwrap()
             }
         };
 
@@ -818,7 +818,7 @@ impl Decoder{
             let image_memory_reqirements=unsafe{
                 self.vulkan.device.get_image_memory_requirements(image)
             };
-            if self.staging_buffer.buffer_size<image_memory_reqirements.size{
+            if self.staging_buffers[0].buffer.buffer_size<image_memory_reqirements.size{
                 panic!("staging buffer not big enough");
             }
 
@@ -834,7 +834,7 @@ impl Decoder{
                     };
                     //allocate image memory
                     unsafe{
-                        memory=self.vulkan.device.allocate_memory(&memory_allocate_info, self.get_allocation_callbacks()).unwrap()
+                        memory=self.vulkan.device.allocate_memory(&memory_allocate_info, self.vulkan.get_allocation_callbacks()).unwrap()
                     }
                     
                     //bind memory to image handle
@@ -842,12 +842,12 @@ impl Decoder{
                         self.vulkan.device.bind_image_memory(image, memory, 0)
                     }.unwrap();
 
-                    let offset=self.staging_buffer_in_use_size;//offset mesh data because staging buffer is used mesh and texture upload, with no synchronization against each other (could do that, somehow?)
-                    self.staging_buffer_in_use_size+=image_memory_reqirements.size;
+                    let offset=self.staging_buffers[0].buffer_in_use_size;//offset mesh data because staging buffer is used mesh and texture upload, with no synchronization against each other (could do that, somehow?)
+                    self.staging_buffers[0].buffer_in_use_size+=image_memory_reqirements.size;
 
                     //map staging memory
                     let memory_pointer=unsafe{
-                        self.vulkan.device.map_memory(self.staging_buffer.memory, offset, image_memory_reqirements.size, vk::MemoryMapFlags::empty())
+                        self.vulkan.device.map_memory(self.staging_buffers[0].buffer.memory, offset, image_memory_reqirements.size, vk::MemoryMapFlags::empty())
                     }.unwrap();
 
                     //copy image data to staging
@@ -857,17 +857,40 @@ impl Decoder{
 
                     //flush staging and unmap after
                     let flush_range=vk::MappedMemoryRange{
-                        memory:self.staging_buffer.memory,
+                        memory:self.staging_buffers[0].buffer.memory,
                         offset,
                         size:image_memory_reqirements.size,
                         ..Default::default()
                     };
                     unsafe{
                         self.vulkan.device.flush_mapped_memory_ranges(&[flush_range]).unwrap();
-                        self.vulkan.device.unmap_memory(self.staging_buffer.memory);
+                        self.vulkan.device.unmap_memory(self.staging_buffers[0].buffer.memory);
                     }
 
                     //schedule image data transfer from staging to final
+
+                    let command_buffer=self.transfer_queue.command_buffers[0];
+
+                    let begin_info=vk::CommandBufferBeginInfo{
+
+                        ..Default::default()
+                    };
+                    
+                    let wait_semaphores=vec![];
+                    let command_buffers=vec![
+                        command_buffer
+                    ];
+                    let signal_semaphores=vec![];
+                    let submit_info=vk::SubmitInfo{
+                        wait_semaphore_count:wait_semaphores.len() as u32,
+                        p_wait_semaphores:wait_semaphores.as_ptr(),
+                        p_wait_dst_stage_mask:&vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        command_buffer_count:command_buffers.len() as u32,
+                        p_command_buffers:command_buffers.as_ptr(),
+                        signal_semaphore_count:signal_semaphores.len() as u32,
+                        p_signal_semaphores:signal_semaphores.as_ptr(),
+                        ..Default::default()
+                    };
                     
                     let image_subresource_range=vk::ImageSubresourceRange{
                         aspect_mask:vk::ImageAspectFlags::COLOR,
@@ -887,10 +910,6 @@ impl Decoder{
                         subresource_range:image_subresource_range,
                         ..Default::default()
                     };
-                    unsafe{
-                        //perform buffer layout transition from copy target to vertex data source
-                        self.vulkan.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_none_to_transfer]);
-                    }
 
                     let buffer_image_copy_info=vk::BufferImageCopy{
                         buffer_offset:offset,
@@ -914,17 +933,7 @@ impl Decoder{
                         },
                         ..Default::default()
                     };
-                    unsafe{
-                        self.vulkan.device.cmd_copy_buffer_to_image(command_buffer, self.staging_buffer.buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy_info]);
-                    }
                     
-                    let image_subresource_range=vk::ImageSubresourceRange{
-                        aspect_mask:vk::ImageAspectFlags::COLOR,
-                        base_mip_level:0,
-                        level_count:1,
-                        base_array_layer:0,
-                        layer_count:1,
-                    };
                     let image_memory_barrier_transfer_to_shader_read = vk::ImageMemoryBarrier{
                         src_access_mask:vk::AccessFlags::TRANSFER_WRITE,
                         dst_access_mask:vk::AccessFlags::SHADER_READ,
@@ -936,8 +945,22 @@ impl Decoder{
                         subresource_range:image_subresource_range,
                         ..Default::default()
                     };
+
                     unsafe{
+                        self.vulkan.device.device_wait_idle().unwrap();
+
+                        self.vulkan.device.begin_command_buffer(command_buffer,&begin_info).unwrap();
+
+                        //perform buffer layout transition from copy target to vertex data source
+                        self.vulkan.device.cmd_pipeline_barrier(command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_none_to_transfer]);
+                        
+                        self.vulkan.device.cmd_copy_buffer_to_image(command_buffer, self.staging_buffers[0].buffer.buffer, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy_info]);
+
                         self.vulkan.device.cmd_pipeline_barrier( command_buffer, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER, vk::DependencyFlags::empty(), &[], &[], &[image_memory_barrier_transfer_to_shader_read]);
+
+                        self.vulkan.device.end_command_buffer(command_buffer).unwrap();
+
+                        self.vulkan.device.queue_submit(self.transfer_queue.queue,&[submit_info],vk::Fence::null()).unwrap();
                     }
 
                     break;
@@ -971,7 +994,7 @@ impl Decoder{
                 ..Default::default()
             };
             unsafe{
-                self.vulkan.device.create_image_view(&image_view_create_info,self.get_allocation_callbacks()).unwrap()
+                self.vulkan.device.create_image_view(&image_view_create_info,self.vulkan.get_allocation_callbacks()).unwrap()
             }
         };
 
@@ -982,9 +1005,10 @@ impl Decoder{
             memory,
             image,
             image_view,
+            layout:vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         });
 
-        self.textures.insert(filename,image.clone());
+        self.textures.insert(String::from(filename),image.clone());
 
         image
     }
