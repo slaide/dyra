@@ -173,7 +173,7 @@ pub struct Decoder{
 
     pub staging_buffers:Vec<StagingBuffer>,
 
-    pub meshes:std::collections::HashMap<&'static str,std::sync::Arc<Mesh>>,
+    pub meshes:std::collections::HashMap<String,std::sync::Arc<Mesh>>,
 
     pub textures:std::collections::HashMap<String,std::sync::Arc<Image>>,
 }
@@ -200,7 +200,7 @@ impl Decoder{
         }
     }
 
-    pub fn get_mesh(&mut self,name:&'static str)->std::sync::Arc<Mesh>{
+    pub fn get_mesh(&mut self,name:&str)->std::sync::Arc<Mesh>{
         if let Some(mesh)=self.meshes.get(name){
             return mesh.clone();
         }
@@ -215,7 +215,7 @@ impl Decoder{
             assert!(attribute.unwrap()=="#version");
 
             let version=lines.next().unwrap().unwrap().parse::<u32>().unwrap();
-            println!("parsing mesh of version {}",version);
+            assert!(version==1);
 
             assert!(lines.next().unwrap().unwrap()=="#settings");
 
@@ -283,13 +283,7 @@ impl Decoder{
             
             assert!(lines.next().unwrap().unwrap()=="#vertexdata");
 
-            let vertex_data_line_count=if vertex_texture_coordinates{
-                vertex_count*2
-            }else{
-                vertex_count
-            };
-
-            let mut vertices={
+            let vertices={
                 if vertex_texture_coordinates{
                     let vertex_data_count=(vertex_count*2) as usize;
                     let mut vertices=Vec::with_capacity(vertex_data_count);
@@ -718,7 +712,7 @@ impl Decoder{
             }
         });
 
-        self.meshes.insert(name,mesh.clone());
+        self.meshes.insert(String::from(name),mesh.clone());
 
         mesh
     }
@@ -868,8 +862,6 @@ impl Decoder{
                     }
 
                     //schedule image data transfer from staging to final
-
-                    let command_buffer=self.transfer_queue.command_buffers[0];
 
                     let begin_info=vk::CommandBufferBeginInfo{
 

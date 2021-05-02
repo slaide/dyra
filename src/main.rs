@@ -1124,7 +1124,7 @@ impl Manager{
         }
     }
 
-    pub fn get_object(&mut self, mesh_filename:&'static str,material_filename:&'static str)->Object{
+    pub fn get_object(&mut self, mesh_filename:&str,material_filename:&str)->Object{
         let mesh=self.decoder.get_mesh(mesh_filename);
 
         use std::io::BufRead;
@@ -1135,6 +1135,7 @@ impl Manager{
 
         assert!(lines.next().unwrap().unwrap()=="#version");
         let version=lines.next().unwrap().unwrap().parse::<u32>().unwrap();
+        assert!(version==1);
 
         assert!(lines.next().unwrap().unwrap()=="#settings");
 
@@ -1248,7 +1249,7 @@ impl Manager{
         let write_descriptor_sets:Vec<Vec<vk::WriteDescriptorSet>>=descriptor_sets.iter().map(|descriptor_set|{
             descriptor_set.set_bindings.iter().map(|binding|{
                 match &binding.binding{
-                    Binding::CombinedImageSampler{image,sampler,descriptor_image_info}=>{
+                    Binding::CombinedImageSampler{image:_,sampler:_,descriptor_image_info}=>{
                         vk::WriteDescriptorSet{
                             dst_set:descriptor_set_handles[descriptor_set.set_index as usize],
                             dst_binding:binding.binding_index,
@@ -1259,6 +1260,7 @@ impl Manager{
                             ..Default::default()
                         }
                     },
+                    #[allow(unreachable_patterns)]
                     _=>unimplemented!()
                 }
             }).collect::<Vec<vk::WriteDescriptorSet>>()
@@ -1270,8 +1272,8 @@ impl Manager{
             }
         }
 
-        for range_index in 0..range_count{
-
+        for _range_index in 0..range_count{
+            unimplemented!()
         }
 
         Object{

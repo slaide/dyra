@@ -433,6 +433,7 @@ impl RenderPass{
         let mut line=line.split('=');
         let attribute=line.next().unwrap();
         assert!(attribute=="single_set_count");
+        #[allow(unused_variables)] //reserved for future use?
         let single_set_count=line.next().unwrap().parse::<u32>().unwrap();
 
         assert!(lines.next().unwrap().unwrap()=="#vertex_shader");
