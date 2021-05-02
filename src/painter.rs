@@ -548,19 +548,19 @@ impl RenderPass{
             }
         }
 
-
         //create layout
-        let set_bindings=vec![
-            vec![
+        let set_bindings:Vec<Vec<vk::DescriptorSetLayoutBinding>>=set_binding_map.iter().enumerate().map(|(index,(set_index,binding_map))|{
+            assert!((index as u32)==*set_index);
+            binding_map.iter().map(|(binding_index,binding)|{
                 vk::DescriptorSetLayoutBinding{
-                    binding:0,//position of this descriptor in set
-                    descriptor_type:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count:1,//represented in shader as array of this length
-                    stage_flags:vk::ShaderStageFlags::FRAGMENT,
+                    binding:*binding_index,
+                    descriptor_type:binding.0,
+                    descriptor_count:binding.1,
+                    stage_flags:binding.2,
                     ..Default::default()
                 }
-            ]
-        ];
+            }).collect()
+        }).collect();
         let descriptor_set_layout_create_infos:Vec<vk::DescriptorSetLayoutCreateInfo>=set_bindings.iter().map(|set_binding|{
             vk::DescriptorSetLayoutCreateInfo{
                 binding_count:set_binding.len() as u32,
@@ -600,12 +600,17 @@ impl RenderPass{
             p_pool_sizes:descriptor_pool_sizes.as_ptr(),
             ..Default::default()
         };
-        let descriptor_pool=unsafe{
-            self.vulkan.device.create_descriptor_pool(&descriptor_pool_create_info,self.vulkan.get_allocation_callbacks())
-        }.unwrap();
+        let descriptor_pool=if descriptor_pool_create_info.pool_size_count>0{
+            unsafe{
+                self.vulkan.device.create_descriptor_pool(&descriptor_pool_create_info,self.vulkan.get_allocation_callbacks())
+            }.unwrap()
+        }else{
+            vk::DescriptorPool::null()
+        };
 
         let push_constant_ranges=vec![];
 
+        println!("{}",descriptor_set_layouts.len());
         let graphics_pipeline_layout_create_info=vk::PipelineLayoutCreateInfo{
             set_layout_count:descriptor_set_layouts.len() as u32,
             p_set_layouts:descriptor_set_layouts.as_ptr(),
@@ -660,11 +665,12 @@ impl RenderPass{
 
         let vertex_input_binding_descriptions=if textured{
             vec![
+                //input entity size and rate, and binding slot
                 vk::VertexInputBindingDescription{
                     binding:0,
                     stride:std::mem::size_of::<crate::decoder::TexturedVertex>() as u32,
                     input_rate:vk::VertexInputRate::VERTEX,
-                }
+                },
             ]
         }else{
             vec![
@@ -678,17 +684,18 @@ impl RenderPass{
 
         let vertex_input_attribute_descriptions=if textured{
             vec![
+                //what are the parts of the input binding slot, and where are they located/expected in the shader?
                 vk::VertexInputAttributeDescription{
                     location:0,
                     binding:vertex_input_binding_descriptions[0].binding,
                     format:vk::Format::R32G32B32A32_SFLOAT,//space position
-                    offset:0,
+                    offset:(offset_of!(crate::decoder::TexturedVertex,vertex_coordinates)+offset_of!(crate::decoder::VertexCoordinates,x)) as u32,
                 },
                 vk::VertexInputAttributeDescription{
                     location:1,
                     binding:vertex_input_binding_descriptions[0].binding,
                     format:vk::Format::R32G32B32_SFLOAT,//texture position
-                    offset:0,
+                    offset:(offset_of!(crate::decoder::TexturedVertex,vertex_texture_coordinates)+offset_of!(crate::decoder::VertexTextureCoordinates,u)) as u32,
                 }
             ]
         }else{
@@ -697,7 +704,7 @@ impl RenderPass{
                     location:0,
                     binding:vertex_input_binding_descriptions[0].binding,
                     format:vk::Format::R32G32B32A32_SFLOAT,//space position
-                    offset:0,
+                    offset:(offset_of!(crate::decoder::Vertex,vertex_coordinates)+offset_of!(crate::decoder::VertexCoordinates,x)) as u32,
                 }
             ]
         };
@@ -1002,39 +1009,45 @@ impl Painter{
                     self.vulkan.device.cmd_begin_render_pass(command_buffer,&render_pass_begin_info,vk::SubpassContents::INLINE)
                 };
 
-
-                //bind first pipeline, statically
-                unsafe{
-                    self.vulkan.device.cmd_bind_pipeline(command_buffer,vk::PipelineBindPoint::GRAPHICS,window_attachment.render_pass_2d.pipelines.iter().next().unwrap().1.pipeline);
-                }
-
-                let viewport=vk::Viewport{
-                    x:0.0,
-                    y:0.0,
-                    width:window_attachment.extent.width as f32,
-                    height:window_attachment.extent.height as f32,
-                    min_depth:0.0,
-                    max_depth:1.0,
-                };
-                let scissor=vk::Rect2D{
-                    offset:vk::Offset2D{
-                        x:0,
-                        y:0,  
-                    },
-                    extent:vk::Extent2D{
-                        width:window_attachment.extent.width,
-                        height:window_attachment.extent.height,
+                for object in scene.objects.iter(){
+                    unsafe{
+                        self.vulkan.device.cmd_bind_pipeline(command_buffer,vk::PipelineBindPoint::GRAPHICS,object.material.pipeline.pipeline);
                     }
-                };
-                unsafe{
-                    self.vulkan.device.cmd_set_viewport(command_buffer,0,&[viewport]);
-                    self.vulkan.device.cmd_set_scissor(command_buffer,0,&[scissor]);
-                }
+    
+                    let viewport=vk::Viewport{
+                        x:0.0,
+                        y:0.0,
+                        width:window_attachment.extent.width as f32,
+                        height:window_attachment.extent.height as f32,
+                        min_depth:0.0,
+                        max_depth:1.0,
+                    };
+                    let scissor=vk::Rect2D{
+                        offset:vk::Offset2D{
+                            x:0,
+                            y:0,  
+                        },
+                        extent:vk::Extent2D{
+                            width:window_attachment.extent.width,
+                            height:window_attachment.extent.height,
+                        }
+                    };
+                    unsafe{
+                        self.vulkan.device.cmd_set_viewport(command_buffer,0,&[viewport]);
+                        self.vulkan.device.cmd_set_scissor(command_buffer,0,&[scissor]);
+                    }
 
-                unsafe{
-                    self.vulkan.device.cmd_bind_vertex_buffers(command_buffer,0,&[scene.objects[0].mesh.vertices.buffer],&[0]);
-                    self.vulkan.device.cmd_bind_index_buffer(command_buffer,scene.objects[0].mesh.vertex_indices.buffer,0,vk::IndexType::UINT16);
-                    self.vulkan.device.cmd_draw_indexed(command_buffer,scene.objects[0].mesh.vertex_indices.item_count as u32,1,0,0,0);
+                    for descriptor_set in object.material.descriptor_sets.iter(){
+                        unsafe{
+                            self.vulkan.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, object.material.pipeline.layout, 0, &[descriptor_set.descriptor_set], &[]);
+                        }
+                    }
+    
+                    unsafe{
+                        self.vulkan.device.cmd_bind_vertex_buffers(command_buffer,0,&[object.mesh.vertices.buffer],&[0]);
+                        self.vulkan.device.cmd_bind_index_buffer(command_buffer,object.mesh.vertex_indices.buffer,0,vk::IndexType::UINT16);
+                        self.vulkan.device.cmd_draw_indexed(command_buffer,object.mesh.vertex_indices.item_count as u32,1,0,0,0);
+                    }
                 }
 
                 unsafe{
@@ -1422,97 +1435,11 @@ impl Painter{
 
         return crate::ControlFlow::Continue;
 
-
-        //record graphics command buffer
-        //begin
+        //below is sample code that uses push constant ranges, will be kept as refernce until similar code is actually implemented above
         /*
-        //for now, begin outside because the manager handles resource upload using this queue, which needs to happen before the actual drawing, but after the 'begin' command
-        let graphics_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
-            flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-            ..Default::default()
-        };
-        unsafe{
-            self.device.begin_command_buffer(self.graphics_queue_command_buffers[0], &graphics_queue_command_buffer_begin_info)
-        }.unwrap();
-
-        //barrier from top to transfer
-        unsafe{
-            self.device.cmd_pipeline_barrier(self.graphics_queue_command_buffers[0],vk::PipelineStageFlags::TOP_OF_PIPE,vk::PipelineStageFlags::TRANSFER,vk::DependencyFlags::empty(),&[],&[],&[])
-        };
-        */
-
-        /*
-
-        //render quad
-        //begin render pass
-        let clear_values=vec![
-            vk::ClearValue{
-                color:vk::ClearColorValue{
-                    float32:[0.9,0.5,0.2,1.0],
-                },
-            },
-            vk::ClearValue{
-                depth_stencil:vk::ClearDepthStencilValue{
-                    depth:1.0,
-                    stencil:0,
-                },
-            },
-        ];
-        let render_pass_begin_info=vk::RenderPassBeginInfo{
-            render_pass:self.render_pass,
-            framebuffer:framebuffer,
-            render_area:vk::Rect2D{
-                offset:vk::Offset2D{
-                    x:0,
-                    y:0,
-                },
-                extent:window_extent
-            },
-            clear_value_count:clear_values.len() as u32,
-            p_clear_values:clear_values.as_ptr(),
-            ..Default::default()
-        };
         unsafe{
             self.device.cmd_begin_render_pass(self.graphics_queue_command_buffers[0], &render_pass_begin_info, vk::SubpassContents::INLINE)
         };
-        //bind pipeline 2d
-        unsafe{
-            self.device.cmd_bind_pipeline(self.graphics_queue_command_buffers[0],vk::PipelineBindPoint::GRAPHICS,self.graphics_pipeline_2d.pipeline);
-        }
-        let viewport=vk::Viewport{
-            x:0.0,
-            y:0.0,
-            width:window_extent.width as f32,
-            height:window_extent.height as f32,
-            min_depth:0.0,
-            max_depth:1.0,
-        };
-        let scissor=vk::Rect2D{
-            offset:vk::Offset2D{
-                x:0,
-                y:0,  
-            },
-            extent:vk::Extent2D{
-                width:window_extent.width,
-                height:window_extent.height,
-            }
-        };
-        unsafe{
-            self.device.cmd_set_viewport(self.graphics_queue_command_buffers[0],0,&[viewport]);
-            self.device.cmd_set_scissor(self.graphics_queue_command_buffers[0],0,&[scissor]);
-        }
-        //bind descriptor set for fragment shader
-        unsafe{
-            self.device.cmd_bind_descriptor_sets(self.graphics_queue_command_buffers[0], vk::PipelineBindPoint::GRAPHICS, self.graphics_pipeline_2d.layout, 0, &[self.descriptor_set], &[]);
-        }
-        //draw
-        for obj in objects.iter(){
-            unsafe{
-                self.device.cmd_bind_vertex_buffers(self.graphics_queue_command_buffers[0],0,&[obj.mesh.vertices.buffer],&[0]);
-                self.device.cmd_bind_index_buffer(self.graphics_queue_command_buffers[0],obj.mesh.vertex_indices.buffer,0,vk::IndexType::UINT16);
-                //self.device.cmd_draw_indexed(self.graphics_queue_command_buffers[0],obj.mesh.vertex_indices.item_count as u32,1,0,0,0);
-            }
-        }
 
         //bind pipeline 3d
         unsafe{
@@ -1558,295 +1485,7 @@ impl Painter{
                 self.device.cmd_draw_indexed(self.graphics_queue_command_buffers[0],obj.mesh.vertex_indices.item_count as u32,1,0,0,0);
             }
         }
-        //end render pass
-        unsafe{
-            self.device.cmd_end_render_pass(self.graphics_queue_command_buffers[0])
-        };
-        //end
-        unsafe{
-            self.device.end_command_buffer(self.graphics_queue_command_buffers[0])
-        }.unwrap();
-        //submit
-        let wait_semaphores_graphics=vec![
-            done,
-        ];
-        let dst_stage_masks_graphics=vec![
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        ];
-        let command_buffers_graphics=vec![
-            self.graphics_queue_command_buffers[0]
-        ];
-        let signal_semaphores=vec![
-            self.rendering_done
-        ];
-        let submit_info_graphics=vk::SubmitInfo{
-            wait_semaphore_count:wait_semaphores_graphics.len() as u32,
-            p_wait_semaphores:wait_semaphores_graphics.as_ptr(),
-            p_wait_dst_stage_mask:dst_stage_masks_graphics.as_ptr(),
-            command_buffer_count:command_buffers_graphics.len() as u32,
-            p_command_buffers:command_buffers_graphics.as_ptr(),
-            signal_semaphore_count:signal_semaphores.len() as u32,
-            p_signal_semaphores:signal_semaphores.as_ptr(),
-            ..Default::default()
-        };
-        unsafe{
-            self.device.queue_submit(self.graphics_queue,&[submit_info_graphics],vk::Fence::null())
-        }.unwrap();
-
         */
-    }
-
-    #[cfg(disabled)]
-    pub fn window_draw_present(&mut self,window_id:u32){
-        
-        //wait for last frame to finish
-        unsafe{
-            self.vulkan.device.wait_for_fences(&[self.frame_sync_fence], true, u64::MAX).unwrap();
-            self.vulkan.device.reset_fences(&[self.frame_sync_fence]).unwrap();
-        }
-
-        {
-            //acquire next swapchain image for drawing and presenting
-            //copied
-            /*
-            let (image_index,suboptimal)=unsafe{
-                self.open_windows[0].swapchain.acquire_next_image(self.open_windows[0].swapchain_handle, u64::MAX, self.open_windows[0].image_available, vk::Fence::null())
-            }.unwrap();
-
-            //this means the swapchain should be recreated, but we dont care much right now
-            if suboptimal{
-                println!("swapchain image acquired is suboptimal");
-                return ControlFlow::Stop;
-            }
-            let swapchain_image=self.open_windows[0].swapchain_images[image_index as usize];
-
-            */
-
-            //transfer swapchain image ownership to graphics queue for drawing
-            {
-                //begin transition command buffer 1
-                let present_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
-                    flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-                    ..Default::default()
-                };
-                unsafe{
-                    self.device.begin_command_buffer(self.present_queue_command_buffers[0],&present_queue_command_buffer_begin_info)
-                }.unwrap();
-                let subresource_range=vk::ImageSubresourceRange{
-                    aspect_mask:vk::ImageAspectFlags::COLOR,
-                    base_mip_level:0,
-                    level_count:1,
-                    base_array_layer:0,
-                    layer_count:1,
-                };
-                let image_memory_barrier=vk::ImageMemoryBarrier{
-                    src_access_mask:vk::AccessFlags::MEMORY_READ,
-                    dst_access_mask:vk::AccessFlags::MEMORY_READ,
-                    old_layout:vk::ImageLayout::UNDEFINED,
-                    new_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    src_queue_family_index:self.present_queue_family_index,
-                    dst_queue_family_index:self.present_queue_family_index,
-                    image:swapchain_image,
-                    subresource_range,
-                    ..Default::default()
-                };
-                unsafe{
-                    self.device.cmd_pipeline_barrier(
-                        self.present_queue_command_buffers[0], 
-                        vk::PipelineStageFlags::TOP_OF_PIPE, 
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, 
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[image_memory_barrier]
-                    )
-                };
-                //end transition command buffer 1
-                unsafe{
-                    self.device.end_command_buffer(self.present_queue_command_buffers[0])
-                }.unwrap();
-                //submit transition command buffer 1
-                let wait_semaphores_1=vec![
-                    self.open_windows[0].image_available,
-                ];
-                let dst_stage_masks_1=vec![
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                ];
-                let command_buffers_1=vec![
-                    self.present_queue_command_buffers[0]
-                ];
-                let signal_semaphores_1=vec![
-                    self.open_windows[0].image_transferable
-                ];
-                let submit_info_1=vk::SubmitInfo{
-                    wait_semaphore_count:wait_semaphores_1.len() as u32,
-                    p_wait_semaphores:wait_semaphores_1.as_ptr(),
-                    p_wait_dst_stage_mask:dst_stage_masks_1.as_ptr(),
-                    command_buffer_count:command_buffers_1.len() as u32,
-                    p_command_buffers:command_buffers_1.as_ptr(),
-                    signal_semaphore_count:signal_semaphores_1.len() as u32,
-                    p_signal_semaphores:signal_semaphores_1.as_ptr(),
-                    ..Default::default()
-                };
-                unsafe{
-                    self.device.queue_submit(self.present_queue,&[submit_info_1],vk::Fence::null())
-                }.unwrap();
-            }
-
-            //upload resources if required, and draw them
-            {
-                let graphics_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
-                    flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-                    ..Default::default()
-                };
-                unsafe{
-                    self.device.begin_command_buffer(self.painter.graphics_queue_command_buffers[0], &graphics_queue_command_buffer_begin_info)
-                }.unwrap();
-        
-                //barrier from top to transfer
-                unsafe{
-                    self.device.cmd_pipeline_barrier(self.painter.graphics_queue_command_buffers[0],vk::PipelineStageFlags::TOP_OF_PIPE,vk::PipelineStageFlags::TRANSFER,vk::DependencyFlags::empty(),&[],&[],&[])
-                };
-
-                //record mesh upload
-                //let quad_data=self.decoder.get_mesh("quad.obj",self.painter.graphics_queue_command_buffers[0]);
-                let quad_data=self.decoder.get_mesh("bunny.obj",self.painter.graphics_queue_command_buffers[0]);
-
-                //record texture upload (use staging buffer range outside of potential mesh upload range)
-                let intel_truck=self.decoder.get_texture("inteltruck.png", self.painter.graphics_queue_command_buffers[0]);
-                
-                //set descriptor set data here for now (only needs to be done once, ever, but i dont know where)
-                {
-                    let descriptor_image_info=vk::DescriptorImageInfo{
-                        sampler:self.painter.sampler,
-                        image_view:intel_truck.image_view,
-                        image_layout:vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    };
-                    let write_descriptor_set=vk::WriteDescriptorSet{
-                        dst_set:self.painter.descriptor_set,
-                        dst_binding:0,
-                        dst_array_element:0,
-                        descriptor_count:1,
-                        descriptor_type:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        p_image_info:&descriptor_image_info,
-                        ..Default::default()
-                    };
-                    unsafe{
-                        self.device.update_descriptor_sets(&[write_descriptor_set],&[])
-                    };
-                    unsafe{
-                        self.device.device_wait_idle()
-                    }.unwrap();
-                }
-
-                self.painter.draw(
-                    self.open_windows[0].swapchain_image_framebuffers[image_index as usize],
-                    self.open_windows[0].extent,
-                    &vec![Object{
-                        mesh:quad_data.clone(),
-                        texture:intel_truck
-                    }],
-                    self.open_windows[0].image_transferable
-                );
-            }
-            self.decoder.staging_buffer_in_use_size=0;
-
-            //retrieve swapchain image from graphics queue for presentation
-            {
-                let present_queue_command_buffer_begin_info=vk::CommandBufferBeginInfo{
-                    flags:vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-                    ..Default::default()
-                };
-                //begin transition command buffer 2
-                unsafe{
-                    self.device.begin_command_buffer(self.present_queue_command_buffers[0],&present_queue_command_buffer_begin_info)
-                }.unwrap();
-                let subresource_range=vk::ImageSubresourceRange{
-                    aspect_mask:vk::ImageAspectFlags::COLOR,
-                    base_mip_level:0,
-                    level_count:1,
-                    base_array_layer:0,
-                    layer_count:1,
-                };
-                let image_memory_barrier=vk::ImageMemoryBarrier{
-                    src_access_mask:vk::AccessFlags::MEMORY_READ,
-                    dst_access_mask:vk::AccessFlags::MEMORY_READ,
-                    old_layout:vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    new_layout:vk::ImageLayout::PRESENT_SRC_KHR,
-                    src_queue_family_index:self.present_queue_family_index,
-                    dst_queue_family_index:self.present_queue_family_index,
-                    image:swapchain_image,
-                    subresource_range,
-                    ..Default::default()
-                };
-                unsafe{
-                    self.device.cmd_pipeline_barrier(
-                        self.present_queue_command_buffers[0], 
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, 
-                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[image_memory_barrier]
-                    )
-                };
-                //end transition command buffer 2
-                unsafe{
-                    self.device.end_command_buffer(self.present_queue_command_buffers[0])
-                }.unwrap();
-                //submit transition command buffer 2
-                let wait_semaphores_2=vec![
-                    self.painter.rendering_done,
-                ];
-                let dst_stage_masks_2=vec![
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                ];
-                let command_buffers_2=vec![
-                    self.present_queue_command_buffers[0]
-                ];
-                let signal_semaphores_2=vec![
-                    self.open_windows[0].image_presentable
-                ];
-                let submit_info_2=vk::SubmitInfo{
-                    wait_semaphore_count:wait_semaphores_2.len() as u32,
-                    p_wait_semaphores:wait_semaphores_2.as_ptr(),
-                    p_wait_dst_stage_mask:dst_stage_masks_2.as_ptr(),
-                    command_buffer_count:command_buffers_2.len() as u32,
-                    p_command_buffers:command_buffers_2.as_ptr(),
-                    signal_semaphore_count:signal_semaphores_2.len() as u32,
-                    p_signal_semaphores:signal_semaphores_2.as_ptr(),
-                    ..Default::default()
-                };
-                unsafe{
-                    self.device.queue_submit(self.present_queue,&[submit_info_2],self.frame_sync_fence)
-                }.unwrap();
-            }
-
-            //copied
-            /*
-            //present swapchain image
-            {
-                let present_wait_semaphores=vec![
-                    self.open_windows[0].image_presentable,
-                ];
-                let mut present_results=vec![
-                    vk::Result::SUCCESS,
-                ];
-                let present_info=vk::PresentInfoKHR{
-                    wait_semaphore_count:present_wait_semaphores.len() as u32,
-                    p_wait_semaphores:present_wait_semaphores.as_ptr(),
-                    swapchain_count:1,
-                    p_swapchains:&self.open_windows[0].swapchain_handle,
-                    p_image_indices:&image_index,
-                    p_results:present_results.as_mut_ptr(),
-                    ..Default::default()
-                };
-                unsafe{
-                    self.open_windows[0].swapchain.queue_present(self.present_queue,&present_info)
-                }.unwrap();
-            }
-            */
-        }   
     }
     
     pub fn add_window(&mut self,window:&crate::Window){

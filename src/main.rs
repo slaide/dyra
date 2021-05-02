@@ -180,15 +180,20 @@ impl Transform{
 
 
 enum Binding{
-    CombinedImageSampler{filename:String}
+    CombinedImageSampler{
+        image:std::sync::Arc<crate::Image>,
+        sampler:std::sync::Arc<vk::Sampler>,
+        descriptor_image_info:vk::DescriptorImageInfo
+    }
 }
 struct SetBinding{
-    set_binding:u32,
+    binding_index:u32,
     binding:Binding,
 }
 struct DescriptorSet{
-    set:u32,
+    set_index:u32,
     set_bindings:Vec<SetBinding>,
+    descriptor_set:vk::DescriptorSet,
 }
 
 struct PushConstantRange{}
@@ -1086,7 +1091,13 @@ impl Manager{
         }
 
         if self.scene.objects.len()==0{
-            let quad=self.get_object("resources/objects/quad.do","resources/materials/untextured2dquad.dm");
+            let textured=1;
+            let quad=if textured==1{
+                self.get_object("resources/objects/texturedquad.do","resources/materials/textured2dquad.dm")
+            }else{
+                self.get_object("resources/objects/quad.do","resources/materials/untextured2dquad.dm")
+            };
+
             self.scene.objects.push(quad);
         }
         self.painter.draw(&self.scene);
@@ -1151,6 +1162,16 @@ impl Manager{
         let mut descriptor_sets=Vec::with_capacity(set_count as usize);
         let push_constant_ranges:Vec<PushConstantRange>=Vec::with_capacity(range_count as usize);
 
+        let descriptor_set_allocate_info=vk::DescriptorSetAllocateInfo{
+            descriptor_pool:graphics_pipeline.descriptor_pool,
+            descriptor_set_count:graphics_pipeline.descriptor_set_layouts.len() as u32,
+            p_set_layouts:graphics_pipeline.descriptor_set_layouts.as_ptr(),
+            ..Default::default()
+        };
+        let descriptor_set_handles=unsafe{
+            self.vulkan.device.allocate_descriptor_sets(&descriptor_set_allocate_info)
+        }.unwrap();
+
         for set_index in 0..set_count{
             let line=lines.next().unwrap().unwrap();
             let mut set_head_line=line.split('.');
@@ -1165,8 +1186,9 @@ impl Manager{
             let binding_count=binding_count_line.next().unwrap().parse::<u32>().unwrap();
 
             descriptor_sets.push(DescriptorSet{
-                set:set_index,
-                set_bindings:Vec::with_capacity(binding_count as usize)
+                set_index,
+                set_bindings:Vec::with_capacity(binding_count as usize),
+                descriptor_set:descriptor_set_handles[set_index as usize],
             });
 
             for binding_index in 0..binding_count{
@@ -1181,18 +1203,73 @@ impl Manager{
                 descriptor_sets[set_index as usize].set_bindings.push(match binding_type{
                     "combined_image_sampler"=>{
                         let filename=String::from(binding_values.next().unwrap());
-                        println!("{}",filename);
-                        SetBinding{
-                            set_binding:binding_index,
+
+                        let sampler_create_info=vk::SamplerCreateInfo{
+                            mag_filter:vk::Filter::LINEAR,
+                            min_filter:vk::Filter::LINEAR,
+                            mipmap_mode:vk::SamplerMipmapMode::NEAREST,
+                            address_mode_u:vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                            address_mode_v:vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                            address_mode_w:vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                            mip_lod_bias:0.0,
+                            anisotropy_enable:false as u32,
+                            compare_enable:false as u32,
+                            min_lod:0.0,
+                            max_lod:0.0,
+                            border_color:vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+                            unnormalized_coordinates:false as u32,
+                            ..Default::default()
+                        };
+                        let sampler=unsafe{
+                            self.vulkan.device.create_sampler(&sampler_create_info,self.vulkan.get_allocation_callbacks())
+                        }.unwrap();
+                        let image=self.decoder.get_texture(&filename,self.decoder.transfer_queue.command_buffers[0]);
+                        let descriptor_image_info=vk::DescriptorImageInfo{
+                            sampler:sampler,
+                            image_view:image.image_view,
+                            image_layout:image.layout,
+                        };
+                        let binding=SetBinding{
+                            binding_index,
                             binding:Binding::CombinedImageSampler{
-                                filename,
-                            }
-                        }
+                                image,
+                                sampler:std::sync::Arc::new(sampler),
+                                descriptor_image_info,
+                            },
+                        };
+
+                        binding
                     },
                     _=>unreachable!()
                 });
             }
         }
+        
+        let write_descriptor_sets:Vec<Vec<vk::WriteDescriptorSet>>=descriptor_sets.iter().map(|descriptor_set|{
+            descriptor_set.set_bindings.iter().map(|binding|{
+                match &binding.binding{
+                    Binding::CombinedImageSampler{image,sampler,descriptor_image_info}=>{
+                        vk::WriteDescriptorSet{
+                            dst_set:descriptor_set_handles[descriptor_set.set_index as usize],
+                            dst_binding:binding.binding_index,
+                            dst_array_element:0,//START index
+                            descriptor_count:1,
+                            descriptor_type:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                            p_image_info:descriptor_image_info,
+                            ..Default::default()
+                        }
+                    },
+                    _=>unimplemented!()
+                }
+            }).collect::<Vec<vk::WriteDescriptorSet>>()
+        }).collect();
+
+        for write_descriptor_set_block in write_descriptor_sets.iter(){
+            unsafe{
+                self.vulkan.device.update_descriptor_sets(&write_descriptor_set_block[..],&[]);
+            }
+        }
+
         for range_index in 0..range_count{
 
         }
