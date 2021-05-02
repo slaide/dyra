@@ -449,8 +449,23 @@ impl RenderPass{
         assert!(attribute=="set_count");
         let vertex_shader_set_count=line.next().unwrap().parse::<u32>().unwrap();
 
-        for i in 0..vertex_shader_set_count{
+        let mut set_binding_map:std::collections::HashMap
+        <
+            u32,//set index
+            std::collections::HashMap
+            <
+                u32,//binding index
+                (
+                    vk::DescriptorType,
+                    u32,//descriptor count
+                    vk::ShaderStageFlags
+                )
+            >
+        >=std::collections::HashMap::new();
+
+        for _i in 0..vertex_shader_set_count{
             //TODO parse this
+            //see reference of fragment shader set parsing below
         }
 
         assert!(lines.next().unwrap().unwrap()=="#fragment_shader");
@@ -468,13 +483,69 @@ impl RenderPass{
         let fragment_shader_set_count=line.next().unwrap().parse::<u32>().unwrap();
 
         for i in 0..fragment_shader_set_count{
-            //TODO parse this
-            /*
-            #fragment_shader_descriptor_set.0
-            set_index=0
-            binding_count=1
-            binding.0=combined_image_sampler
-            */
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('.');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="#fragment_shader_descriptor_set");
+            let fragment_shader_set_index=line.next().unwrap().parse::<u32>().unwrap();
+            assert!(fragment_shader_set_index==i);
+
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="set_index");
+            let set_index=line.next().unwrap().parse::<u32>().unwrap();
+
+            let line=lines.next().unwrap().unwrap();
+            let mut line=line.split('=');
+            let attribute=line.next().unwrap();
+            assert!(attribute=="binding_count");
+            let binding_count=line.next().unwrap().parse::<u32>().unwrap();
+
+            let mut bindings:std::collections::HashMap
+            <
+                u32,//binding index
+                (
+                    vk::DescriptorType,
+                    u32,//descriptor count
+                    vk::ShaderStageFlags
+                )
+            >=std::collections::HashMap::new();
+
+            for _j in 0..binding_count{
+                let line=lines.next().unwrap().unwrap();
+                let mut line=line.split('=');
+                let attribute=line.next().unwrap();
+                let mut attribute=attribute.split('.');
+                assert!(attribute.next().unwrap()=="binding");
+                let binding_index=attribute.next().unwrap().parse::<u32>().unwrap();
+                let descriptor_type=match line.next().unwrap(){
+                    "combined_image_sampler"=>vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    _=>unimplemented!(),
+                };
+
+                bindings.insert(binding_index,(descriptor_type,1,vk::ShaderStageFlags::FRAGMENT));
+            }
+
+            //if set index is already present in map
+            if let Some(e)=set_binding_map.get_mut(&set_index){
+                //update/insert entries for all bindings of current set
+                for (key,binding) in bindings.iter_mut(){
+                    //if binding is already present in set, update
+                    if let Some(b)=e.get_mut(key){
+                        //make sure the descriptor type is identical
+                        assert!(b.0==binding.0);
+                        //and add the shader stage flag to the existing list
+                        b.2|=binding.2;
+                    }else{
+                        //else add the binding to the current set
+                        e.insert(*key,*binding);
+                    }
+                }
+                //else insert the bindings into the map
+            }else{
+                set_binding_map.insert(set_index,bindings);
+            }
         }
 
 
@@ -490,24 +561,39 @@ impl RenderPass{
                 }
             ]
         ];
-        let descriptor_set_layout_create_info=vk::DescriptorSetLayoutCreateInfo{
-            binding_count:set_bindings[0].len() as u32,
-            p_bindings:set_bindings[0].as_ptr(),
-            ..Default::default()
-        };
-        let descriptor_set_layouts=vec![
+        let descriptor_set_layout_create_infos:Vec<vk::DescriptorSetLayoutCreateInfo>=set_bindings.iter().map(|set_binding|{
+            vk::DescriptorSetLayoutCreateInfo{
+                binding_count:set_binding.len() as u32,
+                p_bindings:set_binding.as_ptr(),
+                ..Default::default()
+            }
+        }).collect();
+
+        let descriptor_set_layouts:Vec<vk::DescriptorSetLayout>=descriptor_set_layout_create_infos.iter().map(|descriptor_set_layout_create_info|{
             unsafe{
                 self.vulkan.device.create_descriptor_set_layout(&descriptor_set_layout_create_info,self.vulkan.get_allocation_callbacks())
             }.unwrap()
-        ];
+        }).collect();
 
         //allocate descriptor pool
-        let descriptor_pool_sizes=vec![
-            vk::DescriptorPoolSize{
-                ty:vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count:1,
+        let mut descriptor_pool_size_map=std::collections::HashMap::new();
+        for set in &set_bindings{
+            for binding in set{
+                if let Some(n)=descriptor_pool_size_map.get_mut(&binding.descriptor_type){
+                    *n+=1;
+                }else{
+                    descriptor_pool_size_map.insert(binding.descriptor_type,1);
+                }
             }
-        ];
+        }
+
+        let descriptor_pool_sizes:Vec<vk::DescriptorPoolSize>=descriptor_pool_size_map.iter().map(|(descriptor_type,n)|{
+            vk::DescriptorPoolSize{
+                ty:*descriptor_type,
+                descriptor_count:(*n)*max_set_count,
+            }
+        }).collect();
+
         let descriptor_pool_create_info=vk::DescriptorPoolCreateInfo{
             max_sets:max_set_count,
             pool_size_count:descriptor_pool_sizes.len() as u32,

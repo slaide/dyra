@@ -1133,6 +1133,7 @@ impl Manager{
         assert!(graphics_pipeline_attribute_name=="graphics_pipeline");
         let graphics_pipeline_filename=graphics_pipeline_line.next().unwrap();
 
+        //placeholder for the place where this object loading functionality actually belongs! (some code attached to a window)
         let graphics_pipeline=self.painter.window_attachments.iter_mut().next().unwrap().1.render_pass_2d.new_graphics_pipeline(graphics_pipeline_filename);
 
         let set_count_line=lines.next().unwrap().unwrap();
