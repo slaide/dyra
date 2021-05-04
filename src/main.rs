@@ -178,6 +178,65 @@ impl Transform{
     }
 }
 
+struct Camera{
+    transform:Transform,
+    fov_y:f32,
+    near_clip:f32,
+    far_clip:f32,
+    width:f32,
+    height:f32,
+}
+impl Camera{
+    pub fn projection(&self)->glm::Mat4{
+        glm::perspective_fov(
+            glm::radians(&glm::vec1(self.fov_y)).x,
+            self.width,
+            self.height,
+            self.near_clip,
+            self.far_clip
+        )
+    }
+    pub fn view(&self)->glm::Mat4{
+        glm::look_at(
+            &self.transform.position,
+            &glm::rotate_z_vec3(
+                &glm::rotate_y_vec3(
+                    &glm::rotate_x_vec3(
+                        &glm::vec3(0.0,0.0,-1.0),
+                        glm::radians(&glm::vec1(self.transform.rotation.x)).x
+                    ),
+                    glm::radians(&glm::vec1(self.transform.rotation.x)).x
+                ),
+                glm::radians(&glm::vec1(self.transform.rotation.x)).x
+            ),
+            &glm::vec3(0.0,1.0,0.0),
+        )
+    }
+}
+
+enum Value{
+    u32(u32),
+    u64(u64),
+    f32(f32),
+    f64(f64),
+    vec3(glm::Vec3),
+    vec4(glm::Vec4),
+    mat4(glm::Mat4),
+    transform(Transform),
+    camera(Camera),
+}
+enum Lifetime{
+    //data is written to once during scene lifetime and read multiple times afterwards, e.g. texture data, static object model matrix
+    Scene,
+    //data is written to once per frame and read multiple times during this frame, e.g. camera transform/view&projection matrices
+    Frame,
+    //data is written to and read from once per frame, e.g. dynamic object model matrix
+    Draw,
+}
+struct DynamicValue{
+    value:Option<Box<Value>>,
+    lifetime:Lifetime,
+}
 
 enum Binding{
     CombinedImageSampler{
