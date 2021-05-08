@@ -178,7 +178,7 @@ impl Transform{
     }
 }
 
-struct Camera{
+pub struct Camera{
     transform:Transform,
     fov_y:f32,
     near_clip:f32,
@@ -214,18 +214,14 @@ impl Camera{
     }
 }
 
-enum Value{
-    u32(u32),
-    u64(u64),
-    f32(f32),
-    f64(f64),
-    vec3(glm::Vec3),
-    vec4(glm::Vec4),
-    mat4(glm::Mat4),
-    transform(Transform),
-    camera(Camera),
+pub enum Value{
+    vec3(Box<glm::Vec3>),
+    vec4(Box<glm::Vec4>),
+    mat4(Box<glm::Mat4>),
+    transform(Box<Transform>),
+    camera(Box<Camera>),
 }
-enum Lifetime{
+pub enum Lifetime{
     //data is written to once during scene lifetime and read multiple times afterwards, e.g. texture data, static object model matrix
     Scene,
     //data is written to once per frame and read multiple times during this frame, e.g. camera transform/view&projection matrices
@@ -233,8 +229,8 @@ enum Lifetime{
     //data is written to and read from once per frame, e.g. dynamic object model matrix
     Draw,
 }
-struct DynamicValue{
-    value:Option<Box<Value>>,
+pub struct DynamicValue{
+    value:Option<Value>,
     lifetime:Lifetime,
 }
 
@@ -264,7 +260,7 @@ pub struct Material{
 }
 
 pub struct Object{
-    pub transform:Transform,
+    pub values:std::collections::HashMap<String,std::sync::Arc<DynamicValue>>,
 
     pub mesh:std::sync::Arc<Mesh>,
 
@@ -1150,14 +1146,24 @@ impl Manager{
         }
 
         if self.scene.objects.len()==0{
-            let textured=1;
-            let quad=if textured==1{
-                self.get_object("resources/objects/texturedquad.do","resources/materials/textured2dquad.dm")
-            }else{
-                self.get_object("resources/objects/quad.do","resources/materials/untextured2dquad.dm")
+            let object_id=0;
+            let object=match object_id{
+                0=>{
+                    let values=std::collections::HashMap::new();
+                    self.get_object("resources/objects/quad.do","resources/materials/untextured2dquad.dm",values)
+                },
+                1=>{
+                    let values=std::collections::HashMap::new();
+                    self.get_object("resources/objects/texturedquad.do","resources/materials/textured2dquad.dm",values)
+                },
+                2=>{
+                    let values=std::collections::HashMap::new();
+                    self.get_object("resources/objects/dragon.do","resources/materials/textured2dquad.dm",values)
+                },
+                _=>unreachable!()
             };
 
-            self.scene.objects.push(quad);
+            self.scene.objects.push(object);
         }
         self.painter.draw(&self.scene);
 
@@ -1183,7 +1189,7 @@ impl Manager{
         }
     }
 
-    pub fn get_object(&mut self, mesh_filename:&str,material_filename:&str)->Object{
+    pub fn get_object(&mut self, mesh_filename:&str,material_filename:&str,values:std::collections::HashMap::<String,std::sync::Arc<DynamicValue>>)->Object{
         let mesh=self.decoder.get_mesh(mesh_filename);
 
         use std::io::BufRead;
@@ -1228,9 +1234,13 @@ impl Manager{
             p_set_layouts:graphics_pipeline.descriptor_set_layouts.as_ptr(),
             ..Default::default()
         };
-        let descriptor_set_handles=unsafe{
-            self.vulkan.device.allocate_descriptor_sets(&descriptor_set_allocate_info)
-        }.unwrap();
+        let descriptor_set_handles=if graphics_pipeline.descriptor_pool==vk::DescriptorPool::null(){
+            Vec::new()
+        }else{
+            unsafe{
+                self.vulkan.device.allocate_descriptor_sets(&descriptor_set_allocate_info)
+            }.unwrap()
+        };
 
         for set_index in 0..set_count{
             let line=lines.next().unwrap().unwrap();
@@ -1336,11 +1346,7 @@ impl Manager{
         }
 
         Object{
-            transform:Transform{
-                position:glm::vec3(0.0,0.0,0.0),
-                rotation:glm::vec3(0.0,0.0,0.0),
-                scale:glm::vec3(1.0,1.0,1.0)
-            },
+            values,
             mesh,
             material:std::sync::Arc::<Material>::new(Material{
                 pipeline:graphics_pipeline,

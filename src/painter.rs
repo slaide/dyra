@@ -1040,7 +1040,14 @@ impl Painter{
 
                     for descriptor_set in object.material.descriptor_sets.iter(){
                         unsafe{
-                            self.vulkan.device.cmd_bind_descriptor_sets(command_buffer, vk::PipelineBindPoint::GRAPHICS, object.material.pipeline.layout, 0, &[descriptor_set.descriptor_set], &[]);
+                            self.vulkan.device.cmd_bind_descriptor_sets(
+                                command_buffer, 
+                                vk::PipelineBindPoint::GRAPHICS, 
+                                object.material.pipeline.layout, 
+                                0, 
+                                &[descriptor_set.descriptor_set], 
+                                &[]
+                            );
                         }
                     }
     
