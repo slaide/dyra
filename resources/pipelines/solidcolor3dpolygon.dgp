@@ -1,0 +1,12 @@
+#version
+1
+#settings
+vertex_type=3d
+textured=true
+#vertex_shader
+path=resources/shaders/solidcolor_polygon_3d.vert.spv
+value_count=0
+#fragment_shader
+path=resources/shaders/solidcolor_polygon_3d.frag.spv
+value_count=1
+value.0 lifetime=scene type=vec4 name=color

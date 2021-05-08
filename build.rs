@@ -3,7 +3,12 @@ use std::process::Command;
 use std::str::FromStr;
 
 fn main(){
-    for shader_name in &["resources/shaders/textured_polygon_2d","resources/shaders/untextured_polygon_2d","resources/shaders/textured_polygon_3d"]{
+    for shader_name in &[
+            "resources/shaders/solidcolor_polygon_3d",
+            "resources/shaders/textured_polygon_2d",
+            "resources/shaders/untextured_polygon_2d",
+            "resources/shaders/textured_polygon_3d"
+        ]{
         //add flags in the future to optimize shaders? using spirv-tools optimizer (spirv-opt) as part of lunarg-sdk
         let shader_name=String::from_str(shader_name).unwrap();
 
